@@ -73,7 +73,7 @@ public:
     {
       SolverControl                           solver_control_velocity(1000,
                                             1e-2 * src.block(0).l2_norm());
-      SolverCG<TrilinosWrappers::MPI::Vector> solver_cg_velocity(
+      SolverGMRES<TrilinosWrappers::MPI::Vector> solver_cg_velocity(
         solver_control_velocity);
       solver_cg_velocity.solve(*velocity_stiffness,
                                dst.block(0),
@@ -82,7 +82,7 @@ public:
 
       SolverControl                           solver_control_pressure(1000,
                                             1e-2 * src.block(1).l2_norm());
-      SolverCG<TrilinosWrappers::MPI::Vector> solver_cg_pressure(
+      SolverGMRES<TrilinosWrappers::MPI::Vector> solver_cg_pressure(
         solver_control_pressure);
       solver_cg_pressure.solve(*pressure_mass,
                                dst.block(1),
@@ -123,7 +123,7 @@ public:
     {
       SolverControl                           solver_control_velocity(1000,
                                             1e-2 * src.block(0).l2_norm());
-      SolverCG<TrilinosWrappers::MPI::Vector> solver_cg_velocity(
+      SolverGMRES<TrilinosWrappers::MPI::Vector> solver_cg_velocity(
         solver_control_velocity);
       solver_cg_velocity.solve(*velocity_stiffness,
                                dst.block(0),
@@ -136,7 +136,7 @@ public:
 
       SolverControl                           solver_control_pressure(1000,
                                             1e-2 * src.block(1).l2_norm());
-      SolverCG<TrilinosWrappers::MPI::Vector> solver_cg_pressure(
+      SolverGMRES<TrilinosWrappers::MPI::Vector> solver_cg_pressure(
         solver_control_pressure);
       solver_cg_pressure.solve(*pressure_mass,
                                dst.block(1),
@@ -163,7 +163,9 @@ public:
   // Constructor.
   UnsteadyStokes(const std::string  &mesh_file_name_,
          const unsigned int &degree_velocity_,
-         const unsigned int &degree_pressure_)
+         const unsigned int &degree_pressure_,
+         double             deltat_,
+         double             T_)
     : mpi_size(Utilities::MPI::n_mpi_processes(MPI_COMM_WORLD))
     , mpi_rank(Utilities::MPI::this_mpi_process(MPI_COMM_WORLD))
     , pcout(std::cout, mpi_rank == 0)
@@ -171,6 +173,8 @@ public:
     , degree_velocity(degree_velocity_)
     , degree_pressure(degree_pressure_)
     , mesh(MPI_COMM_WORLD)
+    , deltat(deltat_)
+    , T(T_)
   {}
 
   void
@@ -185,6 +189,9 @@ public:
   void
   output(const unsigned int time_step);
 
+  void 
+  run(); // TODO: generico, start del ciclo
+
 protected:
   // MPI parallel. /////////////////////////////////////////////////////////////
 
@@ -196,13 +203,24 @@ protected:
 
   // Problem definition. ///////////////////////////////////////////////////////
 
-  const double nu = 1.0;
+  const double nu = 0.001;
 
-  const double deltat = 0.1;
+  double deltat;
 
-  const double T = 1.0;
+  double T = 8.0; // Like in the beanchMark, but can be changed
 
   double time = 0.0;
+
+  double rho = 1.0; // Fluid density
+
+  const unsigned int cylinder_boundary_id = 0; // TODO: Identificatore del bordo del cilindro, da verificare con gmsh 
+
+  void assemble_newton_system(); // TODO: per calcolo non lineare
+
+  void solve_newton_system(); // TODO: per calcolo non lineare
+
+   void 
+  compute_lift_drag(double &lift_coeff, double &drag_coeff, double time) const; // TODO: helper per tracciare lift e drag
 
   // Discretization. ///////////////////////////////////////////////////////////
 
@@ -232,7 +250,7 @@ protected:
 
   TrilinosWrappers::BlockSparseMatrix system_matrix;
 
-    TrilinosWrappers::BlockSparseMatrix pressure_mass;
+  TrilinosWrappers::BlockSparseMatrix pressure_mass;
 
   TrilinosWrappers::MPI::BlockVector system_rhs;
 
@@ -241,6 +259,12 @@ protected:
   TrilinosWrappers::MPI::BlockVector solution;
 
   TrilinosWrappers::MPI::BlockVector solution_old;
+
+  // Navier Stokes adjustement for non linearity
+
+  TrilinosWrappers::MPI::BlockVector newton_update;
+
+  TrilinosWrappers::MPI::BlockVector current_solution;
 };
 
 #endif
