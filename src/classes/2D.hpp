@@ -1,5 +1,5 @@
-#ifndef STOKES_HPP
-#define STOKES_HPP
+#ifndef NAVIER_STOKES_2D_HPP
+#define NAVIER_STOKES_2D_HPP
 
 #include <deal.II/base/conditional_ostream.h>
 #include <deal.II/base/quadrature_lib.h>
@@ -35,7 +35,7 @@
 
 using namespace dealii;
 
-class UnsteadyStokes
+class NavierStokes2D
 {
 public:
   static constexpr unsigned int dim = 2;
@@ -151,8 +151,6 @@ public:
 
     const TrilinosWrappers::SparseMatrix *pressure_mass;
 
-    const TrilinosWrappers::SparseMatrix *pressure_mass;
-
     TrilinosWrappers::PreconditionILU preconditioner_pressure;
 
     const TrilinosWrappers::SparseMatrix *B;
@@ -161,11 +159,12 @@ public:
   };
 
   // Constructor.
-  UnsteadyStokes(const std::string  &mesh_file_name_,
+  NavierStokes2D(const std::string  &mesh_file_name_,
          const unsigned int &degree_velocity_,
          const unsigned int &degree_pressure_,
          double             deltat_,
-         double             T_)
+         double             T_,
+         const std::function<double(const Point<dim> &)> &f_)
     : mpi_size(Utilities::MPI::n_mpi_processes(MPI_COMM_WORLD))
     , mpi_rank(Utilities::MPI::this_mpi_process(MPI_COMM_WORLD))
     , pcout(std::cout, mpi_rank == 0)
@@ -175,6 +174,7 @@ public:
     , mesh(MPI_COMM_WORLD)
     , deltat(deltat_)
     , T(T_)
+    , f(f_)
   {}
 
   void
