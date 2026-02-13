@@ -8,12 +8,79 @@ void NavierStokes<dim>::setup()
   pcout << "===============================================" << std::endl;
   pcout << "Setup..." << std::endl;
 
+  // TODO: Controllare se va bene, proabilmente mesh non nativamente supprotata da deal.II, quindi dobbiamo leggere in un triangulation seriale e poi distribuirla.
   // 0. Mesh loading
+  // For parallel::fullydistributed::Triangulation we must:
+  //   a) Read the mesh into a serial Triangulation
+  //   b) Partition it
+  //   c) Create the distributed triangulation from the description
   {
+    Triangulation<dim> serial_mesh;
     GridIn<dim> grid_in;
-    grid_in.attach_triangulation(mesh);
+    grid_in.attach_triangulation(serial_mesh);
+
     std::ifstream input_file(mesh_file_name);
-    grid_in.read_msh(input_file);
+    AssertThrow(input_file.is_open(),
+                ExcMessage("Could not open mesh file: " + mesh_file_name));
+
+    // Read the file, replacing $ParametricNodes with $Nodes
+    // because deal.II does not support $ParametricNodes
+    std::stringstream ss;
+    std::string line;
+    bool in_parametric_nodes = false;
+    bool first_line_after_header = false; // the count line right after $ParametricNodes
+    while (std::getline(input_file, line))
+      {
+        // Strip trailing carriage return (Windows line endings)
+        if (!line.empty() && line.back() == '\r')
+          line.pop_back();
+
+        if (line == "$ParametricNodes")
+          {
+            ss << "$Nodes\n";
+            in_parametric_nodes = true;
+            first_line_after_header = true;
+          }
+        else if (line == "$EndParametricNodes")
+          {
+            ss << "$EndNodes\n";
+            in_parametric_nodes = false;
+          }
+        else if (in_parametric_nodes)
+          {
+            if (first_line_after_header)
+              {
+                // This is the node count line, pass through
+                ss << line << "\n";
+                first_line_after_header = false;
+              }
+            else
+              {
+                // Node line: "id x y z [parametric_data...]"
+                // Keep only the first 4 fields: id x y z
+                std::istringstream iss(line);
+                int id;
+                double x, y, z;
+                iss >> id >> x >> y >> z;
+                ss << id << " " << x << " " << y << " " << z << "\n";
+              }
+          }
+        else
+          {
+            ss << line << "\n";
+          }
+      }
+
+    grid_in.read_msh(ss);
+
+    // Partition the serial mesh for MPI distribution
+    GridTools::partition_triangulation(mpi_size, serial_mesh);
+
+    // Build the fully distributed triangulation
+    auto construction_data =
+      TriangulationDescription::Utilities::create_description_from_triangulation(
+        serial_mesh, MPI_COMM_WORLD);
+    mesh.create_triangulation(construction_data);
   }
 
   double U_mean = 0.0;
@@ -86,6 +153,8 @@ void NavierStokes<dim>::setup()
   BlockDynamicSparsityPattern bdsp(block_relevant_dofs);
   DoFTools::make_sparsity_pattern(dof_handler, bdsp);
 
+
+  // TODO: Stesso problema per la mesh
   system_matrix.reinit(block_owned_dofs, bdsp, MPI_COMM_WORLD);
   pressure_mass.reinit(block_owned_dofs, bdsp, MPI_COMM_WORLD);
 

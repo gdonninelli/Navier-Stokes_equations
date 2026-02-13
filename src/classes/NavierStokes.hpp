@@ -6,6 +6,7 @@
 #include <deal.II/base/quadrature_lib.h>
 
 #include <deal.II/distributed/fully_distributed_tria.h>
+#include <deal.II/distributed/tria.h>
 
 #include <deal.II/dofs/dof_handler.h>
 #include <deal.II/dofs/dof_renumbering.h>
@@ -19,6 +20,8 @@
 
 #include <deal.II/grid/grid_in.h>
 #include <deal.II/grid/grid_tools.h>
+#include <deal.II/grid/tria.h>
+#include <deal.II/grid/tria_description.h>
 
 #include <deal.II/lac/solver_cg.h>
 #include <deal.II/lac/solver_gmres.h>
@@ -37,6 +40,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <sstream>
 
 using namespace dealii;
 
