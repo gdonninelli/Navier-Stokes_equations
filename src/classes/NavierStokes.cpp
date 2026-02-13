@@ -1,12 +1,6 @@
 #include "NavierStokes.hpp"
 
-namespace
-{
-  bool is_in(const unsigned int val, const std::vector<unsigned int> &vec)
-  {
-    return std::find(vec.begin(), vec.end(), val) != vec.end();
-  }
-}
+
 
 template <unsigned int dim>
 void NavierStokes<dim>::setup()
@@ -14,7 +8,14 @@ void NavierStokes<dim>::setup()
   pcout << "===============================================" << std::endl;
   pcout << "Setup..." << std::endl;
 
- 
+  // 0. Mesh loading
+  {
+    GridIn<dim> grid_in;
+    grid_in.attach_triangulation(mesh);
+    std::ifstream input_file(mesh_file_name);
+    grid_in.read_msh(input_file);
+  }
+
   double U_mean = 0.0;
   if (dim == 2)
     U_mean = (2.0 / 3.0) * U_m;
@@ -81,17 +82,12 @@ void NavierStokes<dim>::setup()
   // TODO: Maybe set initial condition here 
 
   // 6. Matrices initialization
-  // Dynamic sparsity pattern
-  DynamicSparsityPattern dsp(locally_relevant_dofs);
-  DoFTools::make_sparsity_pattern(dof_handler, dsp, locally_relevant_dofs, false);
-  
-  SparsityTools::distribute_sparsity_pattern(dsp,
-                                             dof_handler.n_locally_owned_dofs_per_processor(),
-                                             MPI_COMM_WORLD,
-                                             locally_relevant_dofs);
+  // Block dynamic sparsity pattern
+  BlockDynamicSparsityPattern bdsp(block_relevant_dofs);
+  DoFTools::make_sparsity_pattern(dof_handler, bdsp);
 
-  system_matrix.reinit(block_owned_dofs, dsp, MPI_COMM_WORLD);
-  pressure_mass.reinit(block_owned_dofs, dsp, MPI_COMM_WORLD);
+  system_matrix.reinit(block_owned_dofs, bdsp, MPI_COMM_WORLD);
+  pressure_mass.reinit(block_owned_dofs, bdsp, MPI_COMM_WORLD);
 
   pcout << "Setup complete." << std::endl;
 }
@@ -261,7 +257,7 @@ void NavierStokes<dim>::solve_newton_system()
   SolverControl solver_control(10000, 1e-6 * system_rhs.l2_norm());
   
   PreconditionBlockDiagonal preconditioner;
-  preconditioner.initialize(system_matrix, pressure_mass);
+  preconditioner.initialize(system_matrix.block(0, 0), pressure_mass.block(1, 1));
 
   SolverGMRES<TrilinosWrappers::MPI::BlockVector> solver(solver_control);
   
@@ -295,8 +291,6 @@ double NavierStokes<dim>::compute_pressure_difference()
 
     double press_front = 0.0;
     double press_end   = 0.0;
-    bool found_front   = false;
-    bool found_end     = false;
 
     // Use VectorTools::point_value. 
     // Note: throws exception if the point is not in the local cell.
@@ -306,8 +300,7 @@ double NavierStokes<dim>::compute_pressure_difference()
         // Extract pressure component (dim)
         Vector<double> value(dim+1);
         VectorTools::point_value(dof_handler, current_solution, p_front, value);
-        press_front = value[dim]; 
-        found_front = true;
+        press_front = value[dim];
     } catch (...) {
         // Point not in this process
         press_front = 0.0;
@@ -318,7 +311,6 @@ double NavierStokes<dim>::compute_pressure_difference()
         Vector<double> value(dim+1);
         VectorTools::point_value(dof_handler, current_solution, p_end, value);
         press_end = value[dim];
-        found_end = true;
     } catch (...) {
         press_end = 0.0;
     }

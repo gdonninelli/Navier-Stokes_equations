@@ -1,7 +1,21 @@
 cmake_minimum_required(VERSION 3.12.0)
-project(project_title LANGUAGES CXX C)
+project(NavierStokesSolver LANGUAGES CXX)
 
-include(../common/cmake-common.cmake)
+# Find deal.II installation
+# It is usually found automatically if installed in /usr or /usr/local
+find_package(deal.II REQUIRED)
 
-add_executable(lab-01 src/lab-01.cpp src/Poisson1D.cpp)
-deal_ii_setup_target(lab-01)
+# Add inclusion paths for project headers
+include_directories(${CMAKE_SOURCE_DIR}/src/classes)
+
+# Define the source files
+set(SOURCE_FILES
+    src/main.cc
+    src/classes/NavierStokes.cpp
+)
+
+# Define the executable
+add_executable(navier_stokes ${SOURCE_FILES})
+
+# Link against deal.II and its dependencies (MPI, Trilinos, etc.)
+deal_ii_setup_target(navier_stokes)

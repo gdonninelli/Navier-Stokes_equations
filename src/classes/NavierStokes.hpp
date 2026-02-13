@@ -22,6 +22,8 @@
 
 #include <deal.II/lac/solver_cg.h>
 #include <deal.II/lac/solver_gmres.h>
+#include <deal.II/lac/dynamic_sparsity_pattern.h>
+#include <deal.II/lac/block_sparsity_pattern.h>
 #include <deal.II/lac/trilinos_block_sparse_matrix.h>
 #include <deal.II/lac/trilinos_parallel_block_vector.h>
 #include <deal.II/lac/trilinos_precondition.h>
@@ -335,7 +337,15 @@ public:
     , initial_condition(initial_condition_
                           ? initial_condition_
                           : std::make_shared<InitialCondition<dim>>())
-  {}
+  {
+    fe = std::make_unique<FESystem<dim>>(FE_SimplexP<dim>(degree_velocity),
+                                         dim,
+                                         FE_SimplexP<dim>(degree_pressure),
+                                         1);
+    quadrature      = std::make_unique<QGauss<dim>>(degree_velocity + 1);
+    quadrature_face = std::make_unique<QGauss<dim - 1>>(degree_velocity + 1);
+    mapping         = std::make_unique<MappingFE<dim>>(*fe);
+  }
 
   // Some setter for changing the functions at runtime if needed
   void
