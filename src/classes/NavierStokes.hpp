@@ -231,17 +231,31 @@ public:
   };
 
   // Block-triangular preconditioner
+  //
+  // For the saddle-point system  [A  G; D  0] [du; dp] = [f; g],
+  // the Schur complement is  S = -D A^{-1} G  (negative semi-definite).
+  //
+  // The lower block-triangular preconditioner is:
+  //   P = [A  0; D  C]   with  C ≈ S
+  //
+  // For time-dependent NS:  A ≈ (rho/dt)M + nu K + conv,
+  // so  S ≈ -(dt/rho) M_p  and  C^{-1} should be  -(rho/dt) M_p^{-1}.
+  //
+  // We apply ILU(M_p)^{-1} and then multiply by pressure_scaling
+  // (which should be set to  -rho/dt  by the caller).
   class PreconditionBlockTriangular
   {
   public:
     void
     initialize(const TrilinosWrappers::SparseMatrix &velocity_stiffness_,
                const TrilinosWrappers::SparseMatrix &pressure_mass_,
-               const TrilinosWrappers::SparseMatrix &B_)
+               const TrilinosWrappers::SparseMatrix &B_,
+               const double                          pressure_scaling_ = 1.0)
     {
       velocity_stiffness = &velocity_stiffness_;
       pressure_mass      = &pressure_mass_;
       B                  = &B_;
+      pressure_scaling   = pressure_scaling_;
 
       TrilinosWrappers::PreconditionAMG::AdditionalData amg_data;
       amg_data.elliptic              = false;
@@ -255,13 +269,18 @@ public:
     vmult(TrilinosWrappers::MPI::BlockVector       &dst,
           const TrilinosWrappers::MPI::BlockVector &src) const
     {
+      // Step 1: Approximate velocity solve  x ≈ A^{-1} f
       preconditioner_velocity.vmult(dst.block(0), src.block(0));
 
+      // Step 2: Compute  tmp = g - D x  (= g - B*dst0)
       tmp.reinit(src.block(1));
-      B->vmult(tmp, dst.block(0));
-      tmp.sadd(-1.0, src.block(1));
+      B->vmult(tmp, dst.block(0));       // tmp = D x
+      tmp.sadd(-1.0, src.block(1));      // tmp = g - D x
 
+      // Step 3: Approximate Schur complement solve
+      //   y = C^{-1}(g - Dx) ≈ pressure_scaling * M_p^{-1}(g - Dx)
       preconditioner_pressure.vmult(dst.block(1), tmp);
+      dst.block(1) *= pressure_scaling;
     }
 
   protected:
@@ -272,6 +291,7 @@ public:
     TrilinosWrappers::PreconditionILU     preconditioner_pressure;
 
     const TrilinosWrappers::SparseMatrix *B;
+    double pressure_scaling = 1.0;
 
     mutable TrilinosWrappers::MPI::Vector tmp;
   };
@@ -406,7 +426,7 @@ protected:
   double time = 0.0;
 
   // Newton solver parameters
-  static constexpr unsigned int newton_max_iterations = 20;
+  static constexpr unsigned int newton_max_iterations = 50;
   static constexpr double       newton_tolerance      = 1e-8;
 
   // Boundary IDs

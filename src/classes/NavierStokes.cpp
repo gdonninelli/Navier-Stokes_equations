@@ -662,16 +662,32 @@ void NavierStokes<dim>::run()
 
 
       double residual_norm = 1e10;
+      double previous_residual = 1e10;
       unsigned int newton_iter = 0;
+      double damping = 1.0;
 
       while (residual_norm > newton_tolerance && newton_iter < newton_max_iterations)
         {
           assemble_newton_system();
           
           residual_norm = system_rhs.l2_norm();
-          pcout << " [" << newton_iter << ": " << residual_norm << "]" << std::flush;
+          pcout << " [" << newton_iter << ": " << residual_norm;
+          if (damping < 1.0 - 1e-12)
+            pcout << " a=" << damping;
+          pcout << "]" << std::flush;
 
           if (residual_norm < newton_tolerance) break;
+
+          // Adaptive damping: reduce step when residual increases
+          if (newton_iter > 0 && residual_norm > previous_residual)
+            {
+              damping = std::max(0.1, damping * 0.5);
+            }
+          else if (damping < 1.0 - 1e-12)
+            {
+              damping = std::min(1.0, damping * 2.0);
+            }
+          previous_residual = residual_norm;
 
           try
             {
@@ -679,12 +695,13 @@ void NavierStokes<dim>::run()
             }
           catch (const std::exception &e)
             {
-              pcout << " (solver failed, accepting partial update)" << std::flush;
+              pcout << "(linfail)" << std::flush;
+              damping = std::max(0.1, damping * 0.25);
             }
 
-          // Simple damped Newton update (no expensive line search)
+          // Apply Newton update with damping
           solution_owned = current_solution;
-          solution_owned.add(1.0, newton_update);
+          solution_owned.add(damping, newton_update);
           current_solution = solution_owned;
 
           newton_iter++;
