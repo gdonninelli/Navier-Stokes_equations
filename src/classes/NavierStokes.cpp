@@ -510,8 +510,7 @@ void NavierStokes<dim>::output(const unsigned int time_step)
 
   data_out.build_patches();
 
-  std::string filename = "solution-" + Utilities::int_to_string(time_step, 4) + ".vtu";
-  data_out.write_vtu_with_pvtu_record("./", filename, time_step, MPI_COMM_WORLD);
+  data_out.write_vtu_with_pvtu_record("./", "solution", time_step, MPI_COMM_WORLD, 4);
 }
 
 
@@ -554,20 +553,22 @@ void NavierStokes<dim>::run()
       inlet_velocity->set_time(time);
       
       // Impose non-homogeneous BCs on current_solution to start Newton from a valid boundary guess
-      // (Optional but helps initial convergence of the step)
       {
           std::map<types::global_dof_index, double> boundary_values;
           VectorTools::interpolate_boundary_values(dof_handler,
                                                    inlet_boundary_id,
                                                    *inlet_velocity,
                                                    boundary_values);
-          // walls and cylinder are zero, already set
           
           for (auto const& [dof, val] : boundary_values) {
               if (locally_owned_dofs.is_element(dof))
                   current_solution(dof) = val;
           }
           current_solution.compress(VectorOperation::insert);
+          
+          // Update ghosts
+          solution_owned = current_solution;
+          current_solution = solution_owned;
       }
 
 
@@ -585,7 +586,11 @@ void NavierStokes<dim>::run()
 
           solve_newton_system();
 
-          current_solution.add(1.0, newton_update);
+          // Update current_solution and its ghosts
+          solution_owned = current_solution;
+          solution_owned.add(1.0, newton_update);
+          current_solution = solution_owned;
+
           newton_iter++;
         }
       
@@ -601,10 +606,11 @@ void NavierStokes<dim>::run()
       if (mpi_rank == 0)
         {
            forces_file << time << "\t" << drag << "\t" << lift << "\t" << delta_p << std::endl;
+           forces_file.flush();
         }
 
-      // Output frequency
-      if (time_step % 20 == 0) 
+      // Output frequency - Test: output every step
+      if (time_step % 1 == 0) 
         output(time_step);
     }
 }
