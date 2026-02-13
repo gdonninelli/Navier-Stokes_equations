@@ -100,6 +100,7 @@ void NavierStokes<dim>::setup()
   pcout << "  Time step: " << deltat << std::endl;
 
   // 1. DoFHandler 
+  dof_handler.reinit(mesh);
   dof_handler.distribute_dofs(*fe);
 
   // 2. Blocks enumeration (velocity and pressure)
