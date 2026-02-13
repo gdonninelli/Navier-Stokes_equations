@@ -454,6 +454,9 @@ protected:
 
   TrilinosWrappers::MPI::BlockVector newton_update;
   TrilinosWrappers::MPI::BlockVector current_solution;
+
+  // Debug log file (only rank 0 writes)
+  mutable std::ofstream debug_log;
 };
 
 #endif

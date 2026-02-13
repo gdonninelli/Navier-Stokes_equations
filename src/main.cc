@@ -19,8 +19,8 @@ int main(int argc, char *argv[])
       const unsigned int degree_pressure = 1;
 
       // Parametri fisici e temporali per il test
-      const double T_final = 0.1;   // Tempo finale BREVE solo per testare (metti 8.0 per la run vera)
-      const double deltat  = 0.005; // Passo temporale (dt)
+      const double T_final = 8.0;   // Tempo finale BREVE solo per testare (metti 8.0 per la run vera)
+      const double deltat  = 0.1; // Passo temporale (dt)
       const double Re      = 100.0; // Reynolds instazionario (Vedi Project PDF [cite: 111])
 
       // Nome del file mesh generato da Gmsh
