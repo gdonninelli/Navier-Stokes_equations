@@ -14,10 +14,21 @@ void NavierStokes<dim>::setup()
   pcout << "===============================================" << std::endl;
   pcout << "Setup..." << std::endl;
 
-  nu = U_m * D / Re;
+ 
+  double U_mean = 0.0;
+  if (dim == 2)
+    U_mean = (2.0 / 3.0) * U_m;
+  else
+    U_mean = (4.0 / 9.0) * U_m; // Check paper equation for specific 3D case
+
+  // Re = (U_mean * D) / nu  ->  nu = (U_mean * D) / Re
+  nu = (U_mean * D) / Re;
+
   pcout << "  Reynolds number: " << Re << std::endl;
-  pcout << "  Kinematic viscosity: " << nu << std::endl;
-  pcout << "  Inlet Velocity (Um): " << U_m << std::endl;
+  pcout << "  U_max (Inlet param): " << U_m << std::endl;
+  pcout << "  U_mean (Reference): " << U_mean << std::endl;
+  pcout << "  Cylinder Diameter (D): " << D << std::endl;
+  pcout << "  Computed Kinematic viscosity (nu): " << nu << std::endl;
   pcout << "  Time step: " << deltat << std::endl;
 
   // 1. DoFHandler 
@@ -91,36 +102,36 @@ void NavierStokes<dim>::assemble_newton_system()
 {
   system_matrix = 0;
   system_rhs    = 0;
-  pressure_mass = 0; // TODO: Recompute if necessary
+  pressure_mass = 0; // TODO: Recompute if necessary (maybe)
 
   const QGauss<dim> quadrature_formula(degree_velocity + 1);
 
   FEValues<dim> fe_values(*fe,
                           quadrature_formula,
                           update_values | update_gradients |
-                            update_quadrature_points | update_JxW_values);
+                            update_quadrature_points | update_JxW_values); // as usual
 
   const unsigned int dofs_per_cell = fe->dofs_per_cell;
   const unsigned int n_q_points    = quadrature_formula.size();
 
   FullMatrix<double> cell_matrix(dofs_per_cell, dofs_per_cell);
-  FullMatrix<double> cell_pressure_mass(dofs_per_cell, dofs_per_cell); // Solo blocco p-p
+  FullMatrix<double> cell_pressure_mass(dofs_per_cell, dofs_per_cell); 
   Vector<double>     cell_rhs(dofs_per_cell);
 
   std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
 
-  // Estrattori per FEValues (gestiscono vettori e scalari)
+  // Extractors for FEValues (handle vectors and scalars)
   const FEValuesExtractors::Vector velocities(0);
   const FEValuesExtractors::Scalar pressure(dim);
 
-  // Valori della soluzione all'iterazione k (current) e al tempo n-1 (old)
+  // Values of the solution at iteration k (current) and at time n-1 (old)
   std::vector<Tensor<1, dim>> current_velocity_values(n_q_points);
   std::vector<Tensor<2, dim>> current_velocity_gradients(n_q_points);
   std::vector<double>         current_pressure_values(n_q_points);
   
   std::vector<Tensor<1, dim>> old_velocity_values(n_q_points);
 
-  // Vettori di supporto per phi_u, grad_phi_u, phi_p
+  // Support vectors for phi_u, grad_phi_u, phi_p
   std::vector<Tensor<1, dim>> phi_u(dofs_per_cell);
   std::vector<Tensor<2, dim>> grad_phi_u(dofs_per_cell);
   std::vector<double>         phi_p(dofs_per_cell);
@@ -135,7 +146,7 @@ void NavierStokes<dim>::assemble_newton_system()
 
           fe_values.reinit(cell);
 
-          // Estraggo i valori dai vettori globali nei punti di quadratura
+          // Get current solution 
           fe_values[velocities].get_function_values(current_solution, current_velocity_values);
           fe_values[velocities].get_function_gradients(current_solution, current_velocity_gradients);
           fe_values[pressure].get_function_values(current_solution, current_pressure_values);
@@ -146,7 +157,7 @@ void NavierStokes<dim>::assemble_newton_system()
             {
               const double JxW = fe_values.JxW(q);
 
-              // Precalcolo funzioni di base per efficienza
+              // Precompute basis functions for efficiency
               for (unsigned int k = 0; k < dofs_per_cell; ++k)
                 {
                   phi_u[k]      = fe_values[velocities].value(k, q);
@@ -156,52 +167,50 @@ void NavierStokes<dim>::assemble_newton_system()
 
               for (unsigned int i = 0; i < dofs_per_cell; ++i)
                 {
-                  // --- Assemblaggio Residuo (RHS) ---
-                  // R = F - (Termini inerziali + Viscosi + Convettivi + Pressione)
-                  // Nota: portiamo tutto a destra, quindi i segni sono opposti al LHS standard
+                  // Now residual and Jacobian assembly.
+                  // Note: we move everything to the right-hand side, so the signs are opposite to the standard LHS
 
-                  // Termine temporale: (u_k - u_old) / dt * v
+                  // Time term: (u_k - u_old) / dt * v
                   const double time_term = (current_velocity_values[q] - old_velocity_values[q]) * phi_u[i] / deltat;
                   
-                  // Termine convettivo: (u_k . grad u_k) * v
+                  // Convective term: (u_k . grad u_k) * v
                   const double conv_term = (current_velocity_values[q] * current_velocity_gradients[q]) * phi_u[i];
 
-                  // Termine viscoso: nu * (grad u_k : grad v)
+                  // Viscous term: nu * (grad u_k : grad v)
                   const double visc_term = nu * scalar_product(current_velocity_gradients[q], grad_phi_u[i]);
 
-                  // Termine pressione: - p_k * div v
+                  // Pressure term: - p_k * div v
                   const double pres_term = -current_pressure_values[q] * fe_values[velocities].divergence(i, q);
                   
-                  // Termine incompressibilità: - q * div u_k
+                  // Incompressibility term: - q * div u_k
                   const double div_term = -phi_p[i] * trace(current_velocity_gradients[q]);
 
                   cell_rhs(i) += (-time_term - conv_term - visc_term - pres_term - div_term) * JxW;
 
 
-                  // --- Assemblaggio Jacobiano (Matrice di Sistema) ---
-                  // Linearizzazione di Newton
+                  // Newton linearization
                   for (unsigned int j = 0; j < dofs_per_cell; ++j)
                     {
-                      // 1. Massa (da derivata temporale): 1/dt * (u, v)
+                      // 1. Mass (from time derivative): 1/dt * (u, v)
                       double val = (phi_u[i] * phi_u[j]) / deltat;
 
-                      // 2. Viscosità: nu * (grad u, grad v)
+                      // 2. Viscosity: nu * (grad u, grad v)
                       val += nu * scalar_product(grad_phi_u[i], grad_phi_u[j]);
 
-                      // 3. Convezione Linearizzata:
+                      // 3. Linearized Convection:
                       // (u_k . grad du) * v + (du . grad u_k) * v
                       val += (current_velocity_values[q] * grad_phi_u[j]) * phi_u[i] +
                              (phi_u[j] * current_velocity_gradients[q]) * phi_u[i];
 
-                      // 4. Pressione: -(p, div v)
+                      // 4. Pressure: -(p, div v)
                       val -= phi_p[j] * fe_values[velocities].divergence(i, q);
 
-                      // 5. Divergenza: -(q, div u)
+                      // 5. Divergence: -(q, div u)
                       val -= phi_p[i] * fe_values[velocities].divergence(j, q);
 
                       cell_matrix(i, j) += val * JxW;
 
-                      // Matrice massa pressione per precondizionatore
+                      // Pressure mass matrix for preconditioner
                       cell_pressure_mass(i, j) += phi_p[i] * phi_p[j] * JxW;
                     }
                 }
@@ -209,21 +218,22 @@ void NavierStokes<dim>::assemble_newton_system()
 
           cell->get_dof_indices(local_dof_indices);
 
-          // Gestione Constraints (Dirichlet)
-          // Attenzione: In Newton, se un DoF è vincolato (Dirichlet), 
-          // la matrice deve avere 1 sulla diagonale e il RHS deve essere 0 
-          // (perché l'aggiornamento delta_u deve essere nullo sul bordo Dirichlet).
+          // Handle Constraints (Dirichlet)
+          // Note: In Newton, if a DoF is constrained (Dirichlet), 
+          // the matrix must have 1 on the diagonal and the RHS must be 0 
+          // (because the update delta_u must be zero on the Dirichlet boundary).
           
+          // Like ols implementations
+
           AffineConstraints<double> constraints;
           constraints.clear();
           
           // Inlet
-          inlet_velocity->set_time(time); // Aggiorno tempo
           VectorTools::interpolate_boundary_values(dof_handler,
                                                    inlet_boundary_id,
-                                                   *inlet_velocity,
+                                                   Functions::ZeroFunction<dim>(dim + 1), // 0 per Newton update
                                                    constraints);
-          // Walls & Cylinder (No-slip)
+          // Walls & Cylinder
           VectorTools::interpolate_boundary_values(dof_handler,
                                                    wall_boundary_id,
                                                    Functions::ZeroFunction<dim>(dim + 1),
@@ -235,8 +245,6 @@ void NavierStokes<dim>::assemble_newton_system()
           
           constraints.close();
           constraints.distribute_local_to_global(cell_matrix, cell_rhs, local_dof_indices, system_matrix, system_rhs);
-          
-          // Per la pressure mass non applichiamo constraints di velocità
           constraints.distribute_local_to_global(cell_pressure_mass, local_dof_indices, pressure_mass);
         }
     }
@@ -251,31 +259,82 @@ template <unsigned int dim>
 void NavierStokes<dim>::solve_newton_system()
 {
   SolverControl solver_control(10000, 1e-6 * system_rhs.l2_norm());
-
-  // Scegli il precondizionatore (BlockDiagonal o BlockTriangular o Identity)
-  // Qui uso BlockInverse come esempio generico basato sull'HPP
   
   PreconditionBlockDiagonal preconditioner;
   preconditioner.initialize(system_matrix, pressure_mass);
 
   SolverGMRES<TrilinosWrappers::MPI::BlockVector> solver(solver_control);
   
-  // Risolviamo per newton_update (delta u)
+  // Solve for newton_update (delta u)
   newton_update = 0.0;
   solver.solve(system_matrix, newton_update, system_rhs, preconditioner);
 
-  // Distribuisco i ghost
+  // Distribute ghosts
   AffineConstraints<double> constraints;
-  // ... (re-interpolare constraints per coerenza se necessario, ma qui update è 0 su Dirichlet)
+  // ... (re-interpolate constraints for consistency if necessary, but here update is 0 on Dirichlet)
   constraints.close();
   constraints.distribute(newton_update);
+}
+
+// --- ADDED FUNCTION FOR PRESSURE DROP CALCULATION ---
+template <unsigned int dim>
+double NavierStokes<dim>::compute_pressure_difference() 
+{
+    // Benchmark points coordinates (Schaefer-Turek)
+    // 2D: front=(0.15, 0.2), end=(0.25, 0.2)
+    // 3D: front=(0.45, 0.2, 0.205), end=(0.55, 0.2, 0.205)
+    
+    Point<dim> p_front, p_end;
+    if (dim == 2) {
+        p_front = Point<dim>(0.15, 0.2);
+        p_end   = Point<dim>(0.25, 0.2);
+    } else {
+        p_front = Point<dim>(0.45, 0.2, 0.205);
+        p_end   = Point<dim>(0.55, 0.2, 0.205);
+    }
+
+    double press_front = 0.0;
+    double press_end   = 0.0;
+    bool found_front   = false;
+    bool found_end     = false;
+
+    // Use VectorTools::point_value. 
+    // Note: throws exception if the point is not in the local cell.
+    
+    // Front pressure
+    try {
+        // Extract pressure component (dim)
+        Vector<double> value(dim+1);
+        VectorTools::point_value(dof_handler, current_solution, p_front, value);
+        press_front = value[dim]; 
+        found_front = true;
+    } catch (...) {
+        // Point not in this process
+        press_front = 0.0;
+    }
+
+    // End pressure
+    try {
+        Vector<double> value(dim+1);
+        VectorTools::point_value(dof_handler, current_solution, p_end, value);
+        press_end = value[dim];
+        found_end = true;
+    } catch (...) {
+        press_end = 0.0;
+    }
+
+    // MPI sum to get the value from the process that found it
+    press_front = Utilities::MPI::sum(press_front, MPI_COMM_WORLD);
+    press_end   = Utilities::MPI::sum(press_end, MPI_COMM_WORLD);
+
+    return press_front - press_end;
 }
 
 
 template <unsigned int dim>
 void NavierStokes<dim>::compute_lift_drag(double &drag_coeff, double &lift_coeff) const
 {
-  // Calcolo delle forze sul cilindro
+  // Compute forces on the cylinder
   // F = Integral_S (sigma * n) dS
   // sigma = -pI + nu * (grad u + grad u^T)
 
@@ -319,18 +378,18 @@ void NavierStokes<dim>::compute_lift_drag(double &drag_coeff, double &lift_coeff
                       const Tensor<1, dim> normal = fe_face_values.normal_vector(q);
                       const double         JxW    = fe_face_values.JxW(q);
 
-                      // Tensore degli sforzi: sigma = -pI + rho*nu*(grad_u + grad_u^T)
-                      // Nota: rho=1 nel codice, ma usiamo la variabile membro rho per correttezza
+                      // Stress tensor: sigma = -pI + rho*nu*(grad_u + grad_u^T)
+                      // Note: rho=1 in the code, but we use the member variable rho for correctness
                       Tensor<2, dim> stress;
                       for (unsigned int i = 0; i < dim; ++i)
                         stress[i][i] = -p;
                       
-                      // Parte viscosa (Tensor simmetrico)
+                      // Viscous part (symmetric tensor)
                       // stress += rho * nu * (grad_u + transpose(grad_u));
                       // In deal.II:
                       stress += rho * nu * (grad_u + transpose(grad_u));
 
-                      // Forza locale = stress * normal
+                      // Local force = stress * normal
                       Tensor<1, dim> force_loc = stress * normal;
 
                       force_x += force_loc[0] * JxW;
@@ -341,16 +400,22 @@ void NavierStokes<dim>::compute_lift_drag(double &drag_coeff, double &lift_coeff
         }
     }
 
-  // Somma MPI
   force_x = Utilities::MPI::sum(force_x, MPI_COMM_WORLD);
   force_y = Utilities::MPI::sum(force_y, MPI_COMM_WORLD);
 
-  // Coefficienti adimensionali
-  // Cd = 2 * Fx / (rho * U_mean^2 * D * H) -- Formula variabile a seconda della definizione del benchmark
-  // La formula classica Schaefer-Turek è:
-  // Cd = 2 * Fd / (rho * U_mean^2 * D)  (in 2D)
-  // Qui implemento quella generica basata su HPP variables
-  const double den = 0.5 * rho * U_m * U_m * D; // * H se necessario in 3D per area riferimento
+  // --- CORRECT FORMULA FOR BENCHMARK ---
+  // Cd = 2 * Fd / (rho * U_mean^2 * D * H) (3D) or *L (2D, L=1)
+  // Note: U_mean is the mean velocity, not maximum.
+  
+  double U_mean = 0.0;
+  if (dim == 2) U_mean = (2.0/3.0) * U_m;
+  else          U_mean = (4.0/9.0) * U_m;
+
+  // Reference area. 2D: D. 3D: D*H
+  double ref_area = D;
+  if (dim == 3) ref_area = D * H;
+
+  const double den = 0.5 * rho * U_mean * U_mean * ref_area;
   
   drag_coeff = force_x / den;
   lift_coeff = force_y / den;
@@ -362,7 +427,7 @@ void NavierStokes<dim>::output(const unsigned int time_step)
   DataOut<dim> data_out;
   data_out.attach_dof_handler(dof_handler);
   
-  // Partizionamento vettori per output
+  // Partition vectors for output
   std::vector<std::string> solution_names(dim, "velocity");
   solution_names.push_back("pressure");
   
@@ -375,6 +440,12 @@ void NavierStokes<dim>::output(const unsigned int time_step)
                            DataOut<dim>::type_dof_data,
                            data_component_interpretation);
   
+  // Add subdomain ids for MPI debugging
+  Vector<float> subdomain(mesh.n_active_cells());
+  for (unsigned int i = 0; i < subdomain.size(); ++i)
+    subdomain(i) = mesh.locally_owned_subdomain();
+  data_out.add_data_vector(subdomain, "subdomain");
+
   data_out.build_patches();
 
   std::string filename = "solution-" + Utilities::int_to_string(time_step, 4) + ".vtu";
@@ -387,9 +458,16 @@ void NavierStokes<dim>::run()
 {
   setup();
 
-  // Inizializzo solution_old con la condizione iniziale
-  // Qui assume 0, se non diverso
-  current_solution = solution_old;
+  // Solution initialization
+  // Interpolate BC at initial time (t=0)
+  inlet_velocity->set_time(0.0);
+  
+  VectorTools::interpolate(dof_handler,
+                           Functions::ZeroFunction<dim>(dim + 1), // Start from rest
+                           solution_owned);
+  solution = solution_owned;
+  solution_old = solution;
+  current_solution = solution;
 
   double time = 0.0;
   unsigned int time_step = 0;
@@ -398,21 +476,39 @@ void NavierStokes<dim>::run()
   if (mpi_rank == 0)
     {
       forces_file.open("forces.txt");
-      forces_file << "Time Drag Lift" << std::endl;
+      // Output file format required for analysis:
+      // Time | Drag Coeff | Lift Coeff | Delta P
+      forces_file << "Time\tCd\tCl\tDeltaP" << std::endl;
     }
 
-  // Loop temporale
   while (time < T)
     {
       time += deltat;
       time_step++;
       
-      pcout << "Time step " << time_step << " at t=" << time << std::endl;
+      if (mpi_rank == 0) pcout << "Time step " << time_step << " at t=" << time << std::flush;
 
-      // Aggiorno BC temporali
+      // Update BC
       inlet_velocity->set_time(time);
+      
+      // Impose non-homogeneous BCs on current_solution to start Newton from a valid boundary guess
+      // (Optional but helps initial convergence of the step)
+      {
+          std::map<types::global_dof_index, double> boundary_values;
+          VectorTools::interpolate_boundary_values(dof_handler,
+                                                   inlet_boundary_id,
+                                                   *inlet_velocity,
+                                                   boundary_values);
+          // walls and cylinder are zero, already set
+          
+          for (auto const& [dof, val] : boundary_values) {
+              if (locally_owned_dofs.is_element(dof))
+                  current_solution(dof) = val;
+          }
+          current_solution.compress(VectorOperation::insert);
+      }
 
-      // Loop di Newton
+
       double residual_norm = 1e10;
       unsigned int newton_iter = 0;
 
@@ -421,42 +517,32 @@ void NavierStokes<dim>::run()
           assemble_newton_system();
           
           residual_norm = system_rhs.l2_norm();
-          pcout << "  Newton iter " << newton_iter << ": residual = " << residual_norm << std::endl;
+          if (mpi_rank == 0) pcout << " [Res: " << residual_norm << "]" << std::flush;
 
-          if (residual_norm < newton_tolerance)
-            {
-              pcout << "  Converged!" << std::endl;
-              break;
-            }
+          if (residual_norm < newton_tolerance) break;
 
           solve_newton_system();
 
-          // Update soluzione: u_{k+1} = u_k + delta_u
           current_solution.add(1.0, newton_update);
-          
-          // Applico constraints non-omogenei (Inlet variabile)
-          // Nota: nel sistema di Newton risolviamo per l'update con BC omogenee,
-          // ma current_solution deve rispettare le BC reali.
-          // Spesso in Newton si fa: u = u + du. 
-          // E le BC sono imposte imponendo u_k=g sul bordo e du=0.
-          // La mia assemble gestisce questo tramite AffineConstraints sul residuo e matrice.
-          
           newton_iter++;
         }
+      
+      if (mpi_rank == 0) pcout << std::endl;
 
-      // Fine time step: aggiorno la storia
       solution_old = current_solution;
 
-      // Calcolo Lift e Drag
-      double drag, lift;
+      // Benchmark quantities calculation
+      double drag, lift, delta_p;
       compute_lift_drag(drag, lift);
+      delta_p = compute_pressure_difference();
+
       if (mpi_rank == 0)
         {
-           pcout << "  Cd: " << drag << ", Cl: " << lift << std::endl;
-           forces_file << time << " " << drag << " " << lift << std::endl;
+           forces_file << time << "\t" << drag << "\t" << lift << "\t" << delta_p << std::endl;
         }
 
-      if (time_step % 10 == 0) // Output ogni 10 step
+      // Output frequency
+      if (time_step % 20 == 0) 
         output(time_step);
     }
 }

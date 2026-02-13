@@ -432,6 +432,10 @@ protected:
   void
   compute_lift_drag(double &drag_coeff, double &lift_coeff) const;
 
+  // Pressure difference computation.
+  double
+  compute_pressure_difference();
+
   // Newton system (for the nonlinear convective term).
   void
   assemble_newton_system();
