@@ -206,7 +206,11 @@ public:
       velocity_stiffness = &velocity_stiffness_;
       pressure_mass      = &pressure_mass_;
 
-      preconditioner_velocity.initialize(velocity_stiffness_);
+      TrilinosWrappers::PreconditionAMG::AdditionalData amg_data;
+      amg_data.elliptic              = false;
+      amg_data.n_cycles              = 1;
+      amg_data.smoother_sweeps       = 2;
+      preconditioner_velocity.initialize(velocity_stiffness_, amg_data);
       preconditioner_pressure.initialize(pressure_mass_);
     }
 
@@ -220,7 +224,7 @@ public:
 
   protected:
     const TrilinosWrappers::SparseMatrix *velocity_stiffness;
-    TrilinosWrappers::PreconditionILU     preconditioner_velocity;
+    TrilinosWrappers::PreconditionAMG     preconditioner_velocity;
 
     const TrilinosWrappers::SparseMatrix *pressure_mass;
     TrilinosWrappers::PreconditionILU     preconditioner_pressure;
@@ -239,7 +243,11 @@ public:
       pressure_mass      = &pressure_mass_;
       B                  = &B_;
 
-      preconditioner_velocity.initialize(velocity_stiffness_);
+      TrilinosWrappers::PreconditionAMG::AdditionalData amg_data;
+      amg_data.elliptic              = false;
+      amg_data.n_cycles              = 1;
+      amg_data.smoother_sweeps       = 2;
+      preconditioner_velocity.initialize(velocity_stiffness_, amg_data);
       preconditioner_pressure.initialize(pressure_mass_);
     }
 
@@ -258,7 +266,7 @@ public:
 
   protected:
     const TrilinosWrappers::SparseMatrix *velocity_stiffness;
-    TrilinosWrappers::PreconditionILU     preconditioner_velocity;
+    TrilinosWrappers::PreconditionAMG     preconditioner_velocity;
 
     const TrilinosWrappers::SparseMatrix *pressure_mass;
     TrilinosWrappers::PreconditionILU     preconditioner_pressure;
@@ -454,9 +462,6 @@ protected:
 
   TrilinosWrappers::MPI::BlockVector newton_update;
   TrilinosWrappers::MPI::BlockVector current_solution;
-
-  // Debug log file (only rank 0 writes)
-  mutable std::ofstream debug_log;
 };
 
 #endif

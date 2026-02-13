@@ -389,20 +389,6 @@ void NavierStokes<dim>::assemble_newton_system()
   system_matrix.compress(VectorOperation::add);
   system_rhs.compress(VectorOperation::add);
   pressure_mass.compress(VectorOperation::add);
-
-  // DEBUG: Assembly diagnostics
-  if (debug_log.is_open())
-  {
-    debug_log << "  DEBUG [Assembly] ||system_rhs||_L2 = " << system_rhs.l2_norm()
-              << ", ||system_rhs.block(0)||_L2 (velocity) = " << system_rhs.block(0).l2_norm()
-              << ", ||system_rhs.block(1)||_L2 (pressure) = " << system_rhs.block(1).l2_norm()
-              << std::endl;
-    debug_log << "  DEBUG [Assembly] system_matrix.frobenius_norm() = " << system_matrix.frobenius_norm()
-              << ", pressure_mass.frobenius_norm() = " << pressure_mass.frobenius_norm()
-              << std::endl;
-    debug_log << "  DEBUG [Assembly] ||current_solution||_L2 = " << current_solution.l2_norm()
-              << ", ||solution_old||_L2 = " << solution_old.l2_norm() << std::endl;
-  }
 }
 
 
@@ -412,27 +398,20 @@ void NavierStokes<dim>::solve_newton_system()
   const double rhs_norm = system_rhs.l2_norm();
   SolverControl solver_control(20000, 1e-4 * rhs_norm);
 
-  PreconditionBlockDiagonal preconditioner;
-  preconditioner.initialize(system_matrix.block(0, 0), pressure_mass.block(1, 1));
+  // Use block-triangular preconditioner with AMG on velocity block
+  PreconditionBlockTriangular preconditioner;
+  preconditioner.initialize(system_matrix.block(0, 0),
+                            pressure_mass.block(1, 1),
+                            system_matrix.block(1, 0));
 
-  // Increase restart to 100 for better convergence of non-symmetric saddle-point systems
+  // GMRES with restart=150 for saddle-point systems
   typename SolverGMRES<TrilinosWrappers::MPI::BlockVector>::AdditionalData
-    gmres_data(100 /*restart after*/);
+    gmres_data(150 /*restart after*/);
   SolverGMRES<TrilinosWrappers::MPI::BlockVector> solver(solver_control, gmres_data);
 
   // Solve for newton_update (delta u)
   newton_update = 0.0;
   solver.solve(system_matrix, newton_update, system_rhs, preconditioner);
-
-  if (debug_log.is_open())
-  {
-    debug_log << "  DEBUG [Solve] GMRES converged in " << solver_control.last_step()
-              << " iterations, final residual = " << solver_control.last_value() << std::endl;
-    debug_log << "  DEBUG [Solve] ||newton_update||_L2 = " << newton_update.l2_norm()
-              << ", ||newton_update.block(0)||_L2 (vel) = " << newton_update.block(0).l2_norm()
-              << ", ||newton_update.block(1)||_L2 (pres) = " << newton_update.block(1).l2_norm()
-              << std::endl;
-  }
 }
 
 // --- ADDED FUNCTION FOR PRESSURE DROP CALCULATION ---
@@ -631,9 +610,6 @@ void NavierStokes<dim>::run()
       // Output file format required for analysis:
       // Time | Drag Coeff | Lift Coeff | Delta P
       forces_file << "Time\tCd\tCl\tDeltaP" << std::endl;
-
-      debug_log.open("debug_log.txt");
-      debug_log << "=== Navier-Stokes Debug Log ===" << std::endl;
     }
 
   while (time < T)
@@ -643,27 +619,8 @@ void NavierStokes<dim>::run()
       
       if (mpi_rank == 0) pcout << "Time step " << time_step << " at t=" << time << std::flush;
 
-      if (debug_log.is_open())
-        debug_log << "\n=== Time step " << time_step << " at t=" << time << " ===" << std::endl;
-
       // Update BC
       inlet_velocity->set_time(time);
-
-      // DEBUG: Test that the inlet_velocity function returns non-zero at a known point
-      if (debug_log.is_open())
-      {
-        Point<dim> test_point;
-        if constexpr (dim == 2)
-          test_point = Point<dim>(0.0, 0.205); // middle of channel height
-        else
-          test_point = Point<dim>(0.205, 0.205, 0.0);
-        Vector<double> test_val(dim + 1);
-        inlet_velocity->vector_value(test_point, test_val);
-        debug_log << "  DEBUG [BC] inlet_velocity at test point: (";
-        for (unsigned int c = 0; c < dim + 1; ++c)
-          debug_log << test_val[c] << (c < dim ? ", " : "");
-        debug_log << ")" << std::endl;
-      }
       
       // ---- LIFT NON-HOMOGENEOUS BCs ONTO current_solution ----
       {
@@ -678,19 +635,6 @@ void NavierStokes<dim>::run()
                                                  *inlet_velocity,
                                                  boundary_values,
                                                  velocity_mask);
-
-        // DEBUG: How many inlet DOFs were found?
-        unsigned int local_inlet_count = boundary_values.size();
-        double local_max_val = 0.0;
-        for (const auto &[dof, val] : boundary_values)
-          local_max_val = std::max(local_max_val, std::abs(val));
-
-        unsigned int global_inlet_count = Utilities::MPI::sum(local_inlet_count, MPI_COMM_WORLD);
-        double global_max_val = Utilities::MPI::max(local_max_val, MPI_COMM_WORLD);
-        if (debug_log.is_open())
-          debug_log << "  DEBUG [BC] Inlet boundary DOFs found: " << global_inlet_count
-                    << ", max |value|: " << global_max_val << std::endl;
-
         // Walls: no-slip
         VectorTools::interpolate_boundary_values(dof_handler,
                                                  wall_boundary_id,
@@ -704,32 +648,16 @@ void NavierStokes<dim>::run()
                                                  boundary_values,
                                                  velocity_mask);
 
-        if (debug_log.is_open())
-          debug_log << "  DEBUG [BC] Total Dirichlet DOFs (all boundaries): "
-                    << Utilities::MPI::sum((unsigned int)boundary_values.size(), MPI_COMM_WORLD) << std::endl;
-
         // Apply on the OWNED vector
         solution_owned = current_solution;
-        unsigned int applied_count = 0;
         for (const auto &[dof, val] : boundary_values)
           {
             if (locally_owned_dofs.is_element(dof))
-              {
-                solution_owned(dof) = val;
-                ++applied_count;
-              }
+              solution_owned(dof) = val;
           }
-        if (debug_log.is_open())
-          debug_log << "  DEBUG [BC] DOFs applied on this rank: "
-                    << Utilities::MPI::sum(applied_count, MPI_COMM_WORLD) << " (total across ranks)" << std::endl;
 
         // Refresh ghost layer
         current_solution = solution_owned;
-
-        if (debug_log.is_open())
-          debug_log << "  DEBUG [BC] After lifting: ||current_solution||_L2 = "
-                    << current_solution.l2_norm()
-                    << ", ||solution_owned||_L2 = " << solution_owned.l2_norm() << std::endl;
       }
 
 
@@ -741,9 +669,7 @@ void NavierStokes<dim>::run()
           assemble_newton_system();
           
           residual_norm = system_rhs.l2_norm();
-          if (mpi_rank == 0) pcout << " [Res: " << residual_norm << "]" << std::flush;
-          if (debug_log.is_open())
-            debug_log << "  Newton iter " << newton_iter << ": residual = " << residual_norm << std::endl;
+          pcout << " [" << newton_iter << ": " << residual_norm << "]" << std::flush;
 
           if (residual_norm < newton_tolerance) break;
 
@@ -753,60 +679,18 @@ void NavierStokes<dim>::run()
             }
           catch (const std::exception &e)
             {
-              pcout << "\n  WARNING: Linear solver failed: " << e.what()
-                    << "\n  Continuing with partial update..." << std::endl;
-              if (debug_log.is_open())
-                debug_log << "  WARNING: Linear solver failed: " << e.what() << std::endl;
+              pcout << " (solver failed, accepting partial update)" << std::flush;
             }
 
-          // Newton damping / line search:
-          // Start with alpha=1; if residual increases, halve alpha (max 5 reductions).
-          double alpha = 1.0;
-          const double old_residual = residual_norm;
-          TrilinosWrappers::MPI::BlockVector tentative_owned(block_owned_dofs, MPI_COMM_WORLD);
-
-          for (unsigned int ls = 0; ls < 6; ++ls)
-            {
-              tentative_owned = current_solution;
-              tentative_owned.add(alpha, newton_update);
-              current_solution = tentative_owned;
-
-              // Quick residual check (re-assemble to evaluate)
-              if (ls < 5) // skip last check, we accept it
-                {
-                  assemble_newton_system();
-                  const double new_res = system_rhs.l2_norm();
-                  pcout << " [alpha=" << alpha << " new_res=" << new_res << "]" << std::flush;
-                  if (debug_log.is_open())
-                    debug_log << "  Line search: alpha=" << alpha << ", new_res=" << new_res << std::endl;
-
-                  if (new_res < old_residual || alpha < 0.05)
-                    {
-                      residual_norm = new_res;
-                      break;
-                    }
-                  // Revert and try smaller step
-                  current_solution = solution_owned; // revert to before update
-                  // Keep solution_owned unchanged for next attempt
-                  alpha *= 0.5;
-                }
-            }
-
-          // Synchronize solution_owned with the accepted current_solution
+          // Simple damped Newton update (no expensive line search)
           solution_owned = current_solution;
+          solution_owned.add(1.0, newton_update);
+          current_solution = solution_owned;
 
           newton_iter++;
         }
       
-      if (debug_log.is_open())
-      {
-        debug_log << "  DEBUG [Newton] Final: newton_iter=" << newton_iter
-                  << ", residual_norm=" << residual_norm << std::endl;
-        debug_log << "  DEBUG [Newton] ||current_solution||_L2 = " << current_solution.l2_norm()
-                  << ", block(0) vel = " << current_solution.block(0).l2_norm()
-                  << ", block(1) pres = " << current_solution.block(1).l2_norm() << std::endl;
-        debug_log.flush();
-      }
+      pcout << " Newton: " << newton_iter << " iters, res=" << residual_norm << std::endl;
 
       if (mpi_rank == 0) pcout << std::endl;
 
