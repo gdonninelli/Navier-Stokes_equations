@@ -1,4 +1,4 @@
-#include "NavierStokes.hpp"
+#include "classes/NavierStokes.hpp"
 
 // Punto di ingresso del programma
 int main(int argc, char *argv[])

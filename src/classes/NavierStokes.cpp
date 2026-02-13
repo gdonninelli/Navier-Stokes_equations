@@ -1,7 +1,5 @@
 #include "NavierStokes.hpp"
 
-
-
 template <unsigned int dim>
 void NavierStokes<dim>::setup()
 {
@@ -240,9 +238,10 @@ void NavierStokes<dim>::assemble_newton_system()
   system_rhs    = 0;
   pressure_mass = 0; // TODO: Recompute if necessary (maybe)
 
-  const QGauss<dim> quadrature_formula(degree_velocity + 1);
+  const QGaussSimplex<dim> quadrature_formula(degree_velocity + 1);
 
-  FEValues<dim> fe_values(*fe,
+  FEValues<dim> fe_values(*mapping,
+                          *fe,
                           quadrature_formula,
                           update_values | update_gradients |
                             update_quadrature_points | update_JxW_values); // as usual
@@ -282,17 +281,20 @@ void NavierStokes<dim>::assemble_newton_system()
   AffineConstraints<double> constraints;
   constraints.clear();
   constraints.reinit(locally_relevant_dofs);
-  VectorTools::interpolate_boundary_values(dof_handler,
+  VectorTools::interpolate_boundary_values(*mapping,
+                                           dof_handler,
                                            inlet_boundary_id,
                                            Functions::ZeroFunction<dim>(dim + 1),
                                            constraints,
                                            velocity_mask);
-  VectorTools::interpolate_boundary_values(dof_handler,
+  VectorTools::interpolate_boundary_values(*mapping,
+                                           dof_handler,
                                            wall_boundary_id,
                                            Functions::ZeroFunction<dim>(dim + 1),
                                            constraints,
                                            velocity_mask);
-  VectorTools::interpolate_boundary_values(dof_handler,
+  VectorTools::interpolate_boundary_values(*mapping,
+                                           dof_handler,
                                            cylinder_boundary_id,
                                            Functions::ZeroFunction<dim>(dim + 1),
                                            constraints,
@@ -399,10 +401,16 @@ void NavierStokes<dim>::solve_newton_system()
   SolverControl solver_control(20000, 1e-4 * rhs_norm);
 
   // Use block-triangular preconditioner with AMG on velocity block
+  // The pressure Schur complement for time-dependent NS is:
+  //   S = -(dt/rho) M_p  =>  S^{-1} ≈ -(rho/dt) M_p^{-1}
+  // So the pressure_scaling must be -rho/deltat.
+  const double pressure_scaling = -rho / deltat;
+
   PreconditionBlockTriangular preconditioner;
   preconditioner.initialize(system_matrix.block(0, 0),
                             pressure_mass.block(1, 1),
-                            system_matrix.block(1, 0));
+                            system_matrix.block(1, 0),
+                            pressure_scaling);
 
   // GMRES with restart=150 for saddle-point systems
   typename SolverGMRES<TrilinosWrappers::MPI::BlockVector>::AdditionalData
@@ -441,7 +449,7 @@ double NavierStokes<dim>::compute_pressure_difference()
     try {
         // Extract pressure component (dim)
         Vector<double> value(dim+1);
-        VectorTools::point_value(dof_handler, current_solution, p_front, value);
+        VectorTools::point_value(*mapping, dof_handler, current_solution, p_front, value);
         press_front = value[dim];
     } catch (...) {
         // Point not in this process
@@ -451,7 +459,7 @@ double NavierStokes<dim>::compute_pressure_difference()
     // End pressure
     try {
         Vector<double> value(dim+1);
-        VectorTools::point_value(dof_handler, current_solution, p_end, value);
+        VectorTools::point_value(*mapping, dof_handler, current_solution, p_end, value);
         press_end = value[dim];
     } catch (...) {
         press_end = 0.0;
@@ -475,9 +483,10 @@ void NavierStokes<dim>::compute_lift_drag(double &drag_coeff, double &lift_coeff
   double force_x = 0.0;
   double force_y = 0.0;
 
-  const QGauss<dim - 1> face_quadrature_formula(degree_velocity + 1);
+  const QGaussSimplex<dim - 1> face_quadrature_formula(degree_velocity + 1);
 
-  FEFaceValues<dim> fe_face_values(*fe,
+  FEFaceValues<dim> fe_face_values(*mapping,
+                                   *fe,
                                    face_quadrature_formula,
                                    update_values | update_gradients |
                                    update_quadrature_points | update_JxW_values |
@@ -578,7 +587,7 @@ void NavierStokes<dim>::output(const unsigned int time_step)
     subdomain(i) = mesh.locally_owned_subdomain();
   data_out.add_data_vector(subdomain, "subdomain");
 
-  data_out.build_patches();
+  data_out.build_patches(*mapping);
 
   data_out.write_vtu_with_pvtu_record("./", "solution", time_step, MPI_COMM_WORLD, 4);
 }
@@ -593,7 +602,8 @@ void NavierStokes<dim>::run()
   // Interpolate BC at initial time (t=0)
   inlet_velocity->set_time(0.0);
   
-  VectorTools::interpolate(dof_handler,
+  VectorTools::interpolate(*mapping,
+                           dof_handler,
                            Functions::ZeroFunction<dim>(dim + 1), // Start from rest
                            solution_owned);
   solution = solution_owned;
@@ -630,19 +640,22 @@ void NavierStokes<dim>::run()
         std::map<types::global_dof_index, double> boundary_values;
 
         // Inlet: non-homogeneous (parabolic profile)
-        VectorTools::interpolate_boundary_values(dof_handler,
+        VectorTools::interpolate_boundary_values(*mapping,
+                                                 dof_handler,
                                                  inlet_boundary_id,
                                                  *inlet_velocity,
                                                  boundary_values,
                                                  velocity_mask);
         // Walls: no-slip
-        VectorTools::interpolate_boundary_values(dof_handler,
+        VectorTools::interpolate_boundary_values(*mapping,
+                                                 dof_handler,
                                                  wall_boundary_id,
                                                  Functions::ZeroFunction<dim>(dim + 1),
                                                  boundary_values,
                                                  velocity_mask);
         // Cylinder: no-slip
-        VectorTools::interpolate_boundary_values(dof_handler,
+        VectorTools::interpolate_boundary_values(*mapping,
+                                                 dof_handler,
                                                  cylinder_boundary_id,
                                                  Functions::ZeroFunction<dim>(dim + 1),
                                                  boundary_values,

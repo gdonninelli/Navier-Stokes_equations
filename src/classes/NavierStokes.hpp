@@ -345,9 +345,9 @@ public:
                                          dim,
                                          FE_SimplexP<dim>(degree_pressure),
                                          1);
-    quadrature      = std::make_unique<QGauss<dim>>(degree_velocity + 1);
-    quadrature_face = std::make_unique<QGauss<dim - 1>>(degree_velocity + 1);
-    mapping         = std::make_unique<MappingFE<dim>>(*fe);
+    quadrature      = std::make_unique<QGaussSimplex<dim>>(degree_velocity + 1);
+    quadrature_face = std::make_unique<QGaussSimplex<dim - 1>>(degree_velocity + 1);
+    mapping         = std::make_unique<MappingFE<dim>>(FE_SimplexP<dim>(1));
   }
 
   // Some setter for changing the functions at runtime if needed
