@@ -46,6 +46,22 @@
 
 using namespace dealii;
 
+// ==========================================================================
+// Enums for method selection (used in main to configure the solver)
+// ==========================================================================
+enum class TimeScheme     { BackwardEuler, CrankNicolson };
+enum class NonlinearMethod { Newton, Linearized };
+
+// Utility: string conversion for printing
+inline std::string to_string(TimeScheme s)
+{
+  return s == TimeScheme::BackwardEuler ? "Backward Euler" : "Crank-Nicolson";
+}
+inline std::string to_string(NonlinearMethod m)
+{
+  return m == NonlinearMethod::Newton ? "Newton" : "Linearized (semi-implicit)";
+}
+
 // Inlet velocity profile, we can change this for different test case
 template <unsigned int dim>
 class InletVelocity : public Function<dim>
@@ -211,7 +227,8 @@ public:
       TrilinosWrappers::PreconditionAMG::AdditionalData amg_data;
       amg_data.elliptic              = false;
       amg_data.n_cycles              = 1;
-      amg_data.smoother_sweeps       = 2;
+      amg_data.smoother_sweeps       = 3;
+      amg_data.aggregation_threshold = 0.02;
       preconditioner_velocity.initialize(velocity_stiffness_, amg_data);
       preconditioner_pressure.initialize(pressure_mass_);
     }
@@ -262,7 +279,8 @@ public:
       TrilinosWrappers::PreconditionAMG::AdditionalData amg_data;
       amg_data.elliptic              = false;
       amg_data.n_cycles              = 1;
-      amg_data.smoother_sweeps       = 2;
+      amg_data.smoother_sweeps       = 3;
+      amg_data.aggregation_threshold = 0.02;
       preconditioner_velocity.initialize(velocity_stiffness_, amg_data);
       preconditioner_pressure.initialize(pressure_mass_);
     }
@@ -306,7 +324,21 @@ public:
   // Functions are injected via shared_ptr for maximum flexibility.
   // If a pointer is nullptr, the default implementation is used.
   // -----------------------------------------------------------------------
-  // We can inject the functions via shared_ptr, if a pointer is nullptr, the default implementation that are in this file will be used
+  // Static helper: suggested dt based on Reynolds number
+  // -----------------------------------------------------------------------
+  static double compute_default_deltat(double Re)
+  {
+    if (Re <= 20)       return 0.1;
+    else if (Re <= 50)  return 0.05;
+    else if (Re <= 100) return 0.02;
+    else if (Re <= 150) return 0.01;
+    else                return 0.005;
+  }
+
+  // -----------------------------------------------------------------------
+  // Constructor.
+  // deltat_ <= 0 means auto-select based on Re.
+  // -----------------------------------------------------------------------
   NavierStokes(
     const std::string  &mesh_file_name_,
     const unsigned int &degree_velocity_,
@@ -315,6 +347,8 @@ public:
     const double        T_,
     const double        Re_,
     const double        U_m_ = 1.5,
+    TimeScheme          time_scheme_      = TimeScheme::BackwardEuler,
+    NonlinearMethod     nonlinear_method_ = NonlinearMethod::Newton,
     std::shared_ptr<Function<dim>> inlet_velocity_   = nullptr,
     std::shared_ptr<Function<dim>> dirichlet_bc_     = nullptr,
     std::shared_ptr<Function<dim>> forcing_term_     = nullptr,
@@ -328,8 +362,11 @@ public:
     , mesh(MPI_COMM_WORLD)
     , Re(Re_)
     , U_m(U_m_)
-    , deltat(deltat_)
+    , deltat(deltat_ > 0 ? deltat_ : compute_default_deltat(Re_))
     , T(T_)
+    , time_scheme(time_scheme_)
+    , nonlinear_method(nonlinear_method_)
+    , theta(time_scheme_ == TimeScheme::CrankNicolson ? 0.5 : 1.0)
     , inlet_velocity(inlet_velocity_
                        ? inlet_velocity_
                        : std::make_shared<InletVelocity<dim>>(H, U_m_, true))
@@ -382,12 +419,6 @@ public:
   setup();
 
   void
-  assemble();
-
-  void
-  solve();
-
-  void
   output(const unsigned int time_step);
 
   void
@@ -427,6 +458,11 @@ protected:
   double T;
   double time = 0.0;
 
+  // Method selection
+  TimeScheme      time_scheme;
+  NonlinearMethod nonlinear_method;
+  double          theta;  // 1.0 for BE, 0.5 for CN
+
   // Newton solver parameters
   static constexpr unsigned int newton_max_iterations = 50;
   static constexpr double       newton_tolerance      = 1e-8;
@@ -451,12 +487,22 @@ protected:
   double
   compute_pressure_difference();
 
-  // Newton system (for the nonlinear convective term).
+  // Newton system: assembles Jacobian + residual using theta-method.
   void
   assemble_newton_system();
 
+  // Solve Newton linear system for delta u.
   void
   solve_newton_system();
+
+  // Linearized (semi-implicit) system: one linear solve per step.
+  // Convection linearized via extrapolation of transport velocity.
+  void
+  assemble_linearized_system();
+
+  // Solve the linearized system for u^{n+1} directly.
+  void
+  solve_linear_system();
 
   // FEM
   std::unique_ptr<FiniteElement<dim>>  fe;
@@ -485,8 +531,15 @@ protected:
   TrilinosWrappers::MPI::BlockVector newton_update;
   TrilinosWrappers::MPI::BlockVector current_solution;
 
+  // For CN: u^{n-1} (needed for 2nd-order extrapolation of transport velocity)
+  TrilinosWrappers::MPI::BlockVector solution_old_old;
+  bool first_step = true;
+
   // Homogeneous Dirichlet constraints for Newton updates (built once in setup)
   AffineConstraints<double> newton_constraints;
+
+  // Non-homogeneous Dirichlet constraints for linearized approach (rebuilt each step)
+  AffineConstraints<double> system_constraints;
 };
 
 #endif

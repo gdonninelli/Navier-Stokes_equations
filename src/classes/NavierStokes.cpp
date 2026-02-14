@@ -96,6 +96,9 @@ void NavierStokes<dim>::setup()
   pcout << "  Cylinder Diameter (D): " << D << std::endl;
   pcout << "  Computed Kinematic viscosity (nu): " << nu << std::endl;
   pcout << "  Time step: " << deltat << std::endl;
+  pcout << "  Time scheme: " << to_string(time_scheme)
+        << " (theta=" << theta << ")" << std::endl;
+  pcout << "  Nonlinear method: " << to_string(nonlinear_method) << std::endl;
 
   // 1. DoFHandler 
   dof_handler.reinit(mesh);
@@ -210,6 +213,9 @@ void NavierStokes<dim>::setup()
   solution_old.reinit(block_owned_dofs, block_relevant_dofs, MPI_COMM_WORLD);
   current_solution.reinit(block_owned_dofs, block_relevant_dofs, MPI_COMM_WORLD);
 
+  // For CN: u^{n-1} extrapolation vector
+  solution_old_old.reinit(block_owned_dofs, block_relevant_dofs, MPI_COMM_WORLD);
+
   // Set initial conditions
   solution = 0.0;
   solution_old = 0.0;
@@ -303,6 +309,7 @@ void NavierStokes<dim>::assemble_newton_system()
   std::vector<double>         current_pressure_values(n_q_points);
   
   std::vector<Tensor<1, dim>> old_velocity_values(n_q_points);
+  std::vector<Tensor<2, dim>> old_velocity_gradients(n_q_points); // needed for CN (theta<1)
 
   // Support vectors for phi_u, grad_phi_u, phi_p
   std::vector<Tensor<1, dim>> phi_u(dofs_per_cell);
@@ -328,6 +335,7 @@ void NavierStokes<dim>::assemble_newton_system()
           fe_values[pressure].get_function_values(current_solution, current_pressure_values);
           
           fe_values[velocities].get_function_values(solution_old, old_velocity_values);
+          fe_values[velocities].get_function_gradients(solution_old, old_velocity_gradients);
 
           for (unsigned int q = 0; q < n_q_points; ++q)
             {
@@ -343,45 +351,43 @@ void NavierStokes<dim>::assemble_newton_system()
 
               for (unsigned int i = 0; i < dofs_per_cell; ++i)
                 {
-                  // Now residual and Jacobian assembly.
-                  // Note: we move everything to the right-hand side, so the signs are opposite to the standard LHS
+                  // Residual with theta-method (theta=1 BE, theta=0.5 CN)
 
                   // Time term: (u_k - u_old) / dt * v
                   const double time_term = (current_velocity_values[q] - old_velocity_values[q]) * phi_u[i] / deltat;
                   
-                  // Convective term: (u_k . grad u_k) * v
-                  const double conv_term = (current_velocity_values[q] * current_velocity_gradients[q]) * phi_u[i];
+                  // Implicit part (at current Newton iterate)
+                  const double conv_impl = theta * (current_velocity_values[q] * current_velocity_gradients[q]) * phi_u[i];
+                  const double visc_impl = theta * nu * scalar_product(current_velocity_gradients[q], grad_phi_u[i]);
 
-                  // Viscous term: nu * (grad u_k : grad v)
-                  const double visc_term = nu * scalar_product(current_velocity_gradients[q], grad_phi_u[i]);
+                  // Explicit part (at old time step) — only active for CN (theta<1)
+                  const double conv_expl = (1.0 - theta) * (old_velocity_values[q] * old_velocity_gradients[q]) * phi_u[i];
+                  const double visc_expl = (1.0 - theta) * nu * scalar_product(old_velocity_gradients[q], grad_phi_u[i]);
 
-                  // Pressure term: - p_k * div v
+                  // Pressure term: - p_k * div v (fully implicit)
                   const double pres_term = -current_pressure_values[q] * fe_values[velocities].divergence(i, q);
                   
-                  // Incompressibility term: - q * div u_k
+                  // Incompressibility term: - q * div u_k (fully implicit)
                   const double div_term = -phi_p[i] * trace(current_velocity_gradients[q]);
 
-                  cell_rhs(i) += (-time_term - conv_term - visc_term - pres_term - div_term) * JxW;
+                  cell_rhs(i) += (-time_term - conv_impl - visc_impl - conv_expl - visc_expl - pres_term - div_term) * JxW;
 
 
-                  // Newton linearization
+                  // Newton Jacobian with theta-method
                   for (unsigned int j = 0; j < dofs_per_cell; ++j)
                     {
-                      // 1. Mass (from time derivative): 1/dt * (u, v)
                       double val = (phi_u[i] * phi_u[j]) / deltat;
 
-                      // 2. Viscosity: nu * (grad u, grad v)
-                      val += nu * scalar_product(grad_phi_u[i], grad_phi_u[j]);
+                      val += theta * nu * scalar_product(grad_phi_u[i], grad_phi_u[j]);
 
-                      // 3. Linearized Convection:
-                      // (u_k . grad du) * v + (du . grad u_k) * v
-                      val += (current_velocity_values[q] * grad_phi_u[j]) * phi_u[i] +
-                             (phi_u[j] * current_velocity_gradients[q]) * phi_u[i];
+                      // Linearized Convection (implicit fraction)
+                      val += theta * ((current_velocity_values[q] * grad_phi_u[j]) * phi_u[i] +
+                             (phi_u[j] * current_velocity_gradients[q]) * phi_u[i]);
 
-                      // 4. Pressure: -(p, div v)
+                      // Pressure: -(p, div v)
                       val -= phi_p[j] * fe_values[velocities].divergence(i, q);
 
-                      // 5. Divergence: -(q, div u)
+                      // Divergence: -(q, div u)
                       val -= phi_p[i] * fe_values[velocities].divergence(j, q);
 
                       cell_matrix(i, j) += val * JxW;
@@ -409,7 +415,9 @@ template <unsigned int dim>
 void NavierStokes<dim>::solve_newton_system()
 {
   const double rhs_norm = system_rhs.l2_norm();
-  SolverControl solver_control(20000, 1e-4 * rhs_norm);
+
+  // Usiamo una tolleranza di 1e-2
+  SolverControl solver_control(40000, 1e-2 * rhs_norm);
 
   // Use block-triangular preconditioner with AMG on velocity block
   // The pressure Schur complement for time-dependent NS is:
@@ -423,29 +431,210 @@ void NavierStokes<dim>::solve_newton_system()
                             system_matrix.block(1, 0),
                             pressure_scaling);
 
-  // GMRES with restart=150 for saddle-point systems
+  // GMRES con restart=300 per sistemi saddle-point
   typename SolverGMRES<TrilinosWrappers::MPI::BlockVector>::AdditionalData
-    gmres_data(150 /*restart after*/);
+    gmres_data(300 /*restart after*/);
   SolverGMRES<TrilinosWrappers::MPI::BlockVector> solver(solver_control, gmres_data);
 
   // Solve for newton_update (delta u)
   newton_update = 0.0;
   solver.solve(system_matrix, newton_update, system_rhs, preconditioner);
 
-  // Enforce constraints exactly on the Newton update.
-  // Without this, constrained DOFs may have small non-zero values
-  // that accumulate over Newton iterations in parallel.
   newton_constraints.distribute(newton_update);
 }
 
-// --- ADDED FUNCTION FOR PRESSURE DROP CALCULATION ---
+template <unsigned int dim>
+void NavierStokes<dim>::assemble_linearized_system()
+{
+  system_matrix  = 0;
+  system_rhs     = 0;
+  pressure_mass  = 0;
+
+  const QGaussSimplex<dim> quadrature_formula(degree_velocity + 1);
+
+  FEValues<dim> fe_values(*mapping,
+                          *fe,
+                          quadrature_formula,
+                          update_values | update_gradients |
+                            update_quadrature_points | update_JxW_values);
+
+  const unsigned int dofs_per_cell = fe->dofs_per_cell;
+  const unsigned int n_q_points    = quadrature_formula.size();
+
+  FullMatrix<double> cell_matrix(dofs_per_cell, dofs_per_cell);
+  FullMatrix<double> cell_pressure_mass(dofs_per_cell, dofs_per_cell);
+  Vector<double>     cell_rhs(dofs_per_cell);
+
+  std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
+
+  const FEValuesExtractors::Vector velocities(0);
+  const FEValuesExtractors::Scalar pressure(dim);
+
+  // Old solution values
+  std::vector<Tensor<1, dim>> old_velocity_values(n_q_points);
+  std::vector<Tensor<2, dim>> old_velocity_gradients(n_q_points);
+  std::vector<Tensor<1, dim>> old_old_velocity_values(n_q_points);
+
+  // Basis functions
+  std::vector<Tensor<1, dim>> phi_u(dofs_per_cell);
+  std::vector<Tensor<2, dim>> grad_phi_u(dofs_per_cell);
+  std::vector<double>         phi_p(dofs_per_cell);
+
+  // Build non-homogeneous constraints for this time step
+  const ComponentMask velocity_mask = fe->component_mask(velocities);
+
+  system_constraints.clear();
+  system_constraints.reinit(locally_relevant_dofs);
+  VectorTools::interpolate_boundary_values(*mapping,
+                                           dof_handler,
+                                           inlet_boundary_id,
+                                           *inlet_velocity,
+                                           system_constraints,
+                                           velocity_mask);
+  VectorTools::interpolate_boundary_values(*mapping,
+                                           dof_handler,
+                                           wall_boundary_id,
+                                           Functions::ZeroFunction<dim>(dim + 1),
+                                           system_constraints,
+                                           velocity_mask);
+  VectorTools::interpolate_boundary_values(*mapping,
+                                           dof_handler,
+                                           cylinder_boundary_id,
+                                           Functions::ZeroFunction<dim>(dim + 1),
+                                           system_constraints,
+                                           velocity_mask);
+  system_constraints.close();
+
+  // Cell loop
+  for (const auto &cell : dof_handler.active_cell_iterators())
+    {
+      if (!cell->is_locally_owned())
+        continue;
+
+      cell_matrix        = 0;
+      cell_rhs           = 0;
+      cell_pressure_mass = 0;
+
+      fe_values.reinit(cell);
+
+      fe_values[velocities].get_function_values(solution_old, old_velocity_values);
+      fe_values[velocities].get_function_gradients(solution_old, old_velocity_gradients);
+      fe_values[velocities].get_function_values(solution_old_old, old_old_velocity_values);
+
+      for (unsigned int q = 0; q < n_q_points; ++q)
+        {
+          const double JxW = fe_values.JxW(q);
+
+          // Extrapolated transport velocity
+          Tensor<1, dim> u_star;
+          if (first_step || time_scheme == TimeScheme::BackwardEuler)
+            u_star = old_velocity_values[q];          // 1st-order: u* = u^n
+          else
+            u_star = 2.0 * old_velocity_values[q]
+                     - old_old_velocity_values[q];    // 2nd-order: u* = 2u^n - u^{n-1}
+
+          // Precompute basis functions
+          for (unsigned int k = 0; k < dofs_per_cell; ++k)
+            {
+              phi_u[k]      = fe_values[velocities].value(k, q);
+              grad_phi_u[k] = fe_values[velocities].gradient(k, q);
+              phi_p[k]      = fe_values[pressure].value(k, q);
+            }
+
+          for (unsigned int i = 0; i < dofs_per_cell; ++i)
+            {
+              // RHS: explicit contributions from time n
+              // (1/dt)(u^n . phi)
+              const double rhs_mass =
+                (1.0 / deltat) * (old_velocity_values[q] * phi_u[i]);
+
+              // -(1-theta) * nu * (grad u^n : grad phi)
+              const double rhs_visc =
+                -(1.0 - theta) * nu *
+                scalar_product(old_velocity_gradients[q], grad_phi_u[i]);
+
+              // -(1-theta) * ((u^n . grad)u^n . phi)
+              const double rhs_conv =
+                -(1.0 - theta) *
+                ((old_velocity_values[q] * old_velocity_gradients[q]) * phi_u[i]);
+
+              cell_rhs(i) += (rhs_mass + rhs_visc + rhs_conv) * JxW;
+
+              // LHS: matrix entries
+              for (unsigned int j = 0; j < dofs_per_cell; ++j)
+                {
+                  // Mass: (1/dt)(phi_j . phi_i)
+                  double val = (1.0 / deltat) * (phi_u[i] * phi_u[j]);
+
+                  // Viscosity (implicit fraction): theta * nu * (grad phi_j : grad phi_i)
+                  val += theta * nu * scalar_product(grad_phi_u[i], grad_phi_u[j]);
+
+                  // Semi-implicit convection: theta * (u* . grad phi_j) . phi_i
+                  val += theta * (u_star * grad_phi_u[j]) * phi_u[i];
+
+                  // Pressure: -(psi_j, div phi_i)
+                  val -= phi_p[j] * fe_values[velocities].divergence(i, q);
+
+                  // Divergence: -(psi_i, div phi_j)
+                  val -= phi_p[i] * fe_values[velocities].divergence(j, q);
+
+                  cell_matrix(i, j) += val * JxW;
+
+                  // Pressure mass for preconditioner
+                  cell_pressure_mass(i, j) += phi_p[i] * phi_p[j] * JxW;
+                }
+            }
+        }
+
+      cell->get_dof_indices(local_dof_indices);
+
+      system_constraints.distribute_local_to_global(cell_matrix,
+                                                     cell_rhs,
+                                                     local_dof_indices,
+                                                     system_matrix,
+                                                     system_rhs);
+      system_constraints.distribute_local_to_global(cell_pressure_mass,
+                                                     local_dof_indices,
+                                                     pressure_mass);
+    }
+
+  system_matrix.compress(VectorOperation::add);
+  system_rhs.compress(VectorOperation::add);
+  pressure_mass.compress(VectorOperation::add);
+}
+
+template <unsigned int dim>
+void NavierStokes<dim>::solve_linear_system()
+{
+  const double rhs_norm = system_rhs.l2_norm();
+  // Use 1e-4 relative tolerance
+  SolverControl solver_control(40000, std::max(1e-4 * rhs_norm, 1e-12));
+
+  const double pressure_scaling = -rho / deltat;
+
+  PreconditionBlockTriangular preconditioner;
+  preconditioner.initialize(system_matrix.block(0, 0),
+                            pressure_mass.block(1, 1),
+                            system_matrix.block(1, 0),
+                            pressure_scaling);
+
+  typename SolverGMRES<TrilinosWrappers::MPI::BlockVector>::AdditionalData
+    gmres_data(300);
+  SolverGMRES<TrilinosWrappers::MPI::BlockVector> solver(solver_control, gmres_data);
+
+  solution_owned = 0.0;
+  solver.solve(system_matrix, solution_owned, system_rhs, preconditioner);
+
+  system_constraints.distribute(solution_owned);
+
+  pcout << "  GMRES: " << solver_control.last_step() << " iters" << std::endl;
+}
+
+// ?? Capire come modificare questa funzione in maniera più generale
+// serve a calcolare la differenza di pressione tra due punti (p_front e p_end) e mi baso sul paper
 template <unsigned int dim>
 double NavierStokes<dim>::compute_pressure_difference() 
-{
-    // Benchmark points coordinates (Schaefer-Turek)
-    // 2D: front=(0.15, 0.2), end=(0.25, 0.2)
-    // 3D: front=(0.45, 0.2, 0.205), end=(0.55, 0.2, 0.205)
-    
+{    
     Point<dim> p_front, p_end;
     if (dim == 2) {
         p_front = Point<dim>(0.15, 0.2);
@@ -568,11 +757,13 @@ void NavierStokes<dim>::compute_lift_drag(double &drag_coeff, double &lift_coeff
   if (dim == 2) U_mean = (2.0/3.0) * U_m;
   else          U_mean = (4.0/9.0) * U_m;
 
-  // Reference area. 2D: D. 3D: D*H
+  // Reference area. 2D: D (cross-sectional length). 3D: D*H
   double ref_area = D;
   if (dim == 3) ref_area = D * H;
 
-  const double den = 0.5 * rho * U_mean * U_mean * ref_area;
+  // Project formula: Cd = Fd / (U^2 * L), Cl = Fl / (U^2 * L)
+  // where U = U_mean (reference velocity), L = ref_area
+  const double den = rho * U_mean * U_mean * ref_area;
   
   drag_coeff = force_x / den;
   lift_coeff = force_y / den;
@@ -614,149 +805,191 @@ void NavierStokes<dim>::run()
 {
   setup();
 
-  // Solution initialization
-  // Interpolate BC at initial time (t=0)
+  // Solution initialization — start from rest
   inlet_velocity->set_time(0.0);
-  
+
   VectorTools::interpolate(*mapping,
                            dof_handler,
-                           Functions::ZeroFunction<dim>(dim + 1), // Start from rest
+                           Functions::ZeroFunction<dim>(dim + 1),
                            solution_owned);
-  solution = solution_owned;
-  solution_old = solution;
+  solution         = solution_owned;
+  solution_old     = solution;
+  solution_old_old = solution;
   current_solution = solution;
+  first_step       = true;
 
-  double time = 0.0;
+  double       time      = 0.0;
   unsigned int time_step = 0;
 
+  // Output interval: approximately every 0.1 seconds
+  const unsigned int output_every =
+    std::max(1u, static_cast<unsigned int>(std::round(0.1 / deltat)));
+
+  // File for benchmark quantities
   std::ofstream forces_file;
   if (mpi_rank == 0)
-    {
-      forces_file.open("forces.txt");
-      // Output file format required for analysis:
-      // Time | Drag Coeff | Lift Coeff | Delta P
-      forces_file << "Time\tCd\tCl\tDeltaP" << std::endl;
-    }
-
+  {
+    forces_file.open("forces.txt");
+    forces_file << "Time\tCd\tCl\tDeltaP" << std::endl;
+  }
+  
   while (time < T)
     {
       time += deltat;
       time_step++;
-      
-      if (mpi_rank == 0) pcout << "Time step " << time_step << " at t=" << time << std::flush;
 
-      // Update BC
+      pcout << "Time step " << time_step << " at t=" << time << std::flush;
+
+      // Update BC to t^{n+1}
       inlet_velocity->set_time(time);
-      
-      // ---- LIFT NON-HOMOGENEOUS BCs ONTO current_solution ----
-      {
-        const FEValuesExtractors::Vector velocities(0);
-        const ComponentMask velocity_mask = fe->component_mask(velocities);
 
-        std::map<types::global_dof_index, double> boundary_values;
-
-        // Inlet: non-homogeneous (parabolic profile)
-        VectorTools::interpolate_boundary_values(*mapping,
-                                                 dof_handler,
-                                                 inlet_boundary_id,
-                                                 *inlet_velocity,
-                                                 boundary_values,
-                                                 velocity_mask);
-        // Walls: no-slip
-        VectorTools::interpolate_boundary_values(*mapping,
-                                                 dof_handler,
-                                                 wall_boundary_id,
-                                                 Functions::ZeroFunction<dim>(dim + 1),
-                                                 boundary_values,
-                                                 velocity_mask);
-        // Cylinder: no-slip
-        VectorTools::interpolate_boundary_values(*mapping,
-                                                 dof_handler,
-                                                 cylinder_boundary_id,
-                                                 Functions::ZeroFunction<dim>(dim + 1),
-                                                 boundary_values,
-                                                 velocity_mask);
-
-        // Apply on the OWNED vector
-        solution_owned = current_solution;
-        for (const auto &[dof, val] : boundary_values)
+      // Newton Approach
+      if (nonlinear_method == NonlinearMethod::Newton)
+        {
+          // Lift non-homogeneous BCs onto current_solution
           {
-            if (locally_owned_dofs.is_element(dof))
-              solution_owned(dof) = val;
+            const FEValuesExtractors::Vector velocities(0);
+            const ComponentMask velocity_mask = fe->component_mask(velocities);
+
+            std::map<types::global_dof_index, double> boundary_values;
+
+            VectorTools::interpolate_boundary_values(*mapping,
+                                                     dof_handler,
+                                                     inlet_boundary_id,
+                                                     *inlet_velocity,
+                                                     boundary_values,
+                                                     velocity_mask);
+            VectorTools::interpolate_boundary_values(*mapping,
+                                                     dof_handler,
+                                                     wall_boundary_id,
+                                                     Functions::ZeroFunction<dim>(dim + 1),
+                                                     boundary_values,
+                                                     velocity_mask);
+            VectorTools::interpolate_boundary_values(*mapping,
+                                                     dof_handler,
+                                                     cylinder_boundary_id,
+                                                     Functions::ZeroFunction<dim>(dim + 1),
+                                                     boundary_values,
+                                                     velocity_mask);
+
+            solution_owned = current_solution;
+            for (const auto &[dof, val] : boundary_values)
+              {
+                if (locally_owned_dofs.is_element(dof))
+                  solution_owned(dof) = val;
+              }
+            current_solution = solution_owned;
           }
 
-        // Refresh ghost layer
-        current_solution = solution_owned;
-      }
+          // Newton iteration loop
+          double       residual_norm     = 1e10;
+          double       previous_residual = 1e10;
+          unsigned int newton_iter       = 0;
+          double       damping           = 1.0;
 
+          TrilinosWrappers::MPI::BlockVector solution_backup;
+          solution_backup.reinit(block_owned_dofs, MPI_COMM_WORLD);
 
-      double residual_norm = 1e10;
-      double previous_residual = 1e10;
-      unsigned int newton_iter = 0;
-      double damping = 1.0;
-
-      while (residual_norm > newton_tolerance && newton_iter < newton_max_iterations)
-        {
-          assemble_newton_system();
-          
-          residual_norm = system_rhs.l2_norm();
-          pcout << " [" << newton_iter << ": " << residual_norm;
-          if (damping < 1.0 - 1e-12)
-            pcout << " a=" << damping;
-          pcout << "]" << std::flush;
-
-          if (residual_norm < newton_tolerance) break;
-
-          // Adaptive damping: reduce step when residual increases
-          if (newton_iter > 0 && residual_norm > previous_residual)
+          while (residual_norm > newton_tolerance &&
+                 newton_iter < newton_max_iterations)
             {
-              damping = std::max(0.1, damping * 0.5);
-            }
-          else if (damping < 1.0 - 1e-12)
-            {
-              damping = std::min(1.0, damping * 2.0);
-            }
-          previous_residual = residual_norm;
+              assemble_newton_system();
 
-          try
-            {
-              solve_newton_system();
-            }
-          catch (const std::exception &e)
-            {
-              pcout << "(linfail)" << std::flush;
-              damping = std::max(0.1, damping * 0.25);
+              residual_norm = system_rhs.l2_norm();
+              pcout << " [" << newton_iter << ": " << residual_norm;
+              if (damping < 1.0 - 1e-12)
+                pcout << " a=" << damping;
+              pcout << "]" << std::flush;
+
+              if (residual_norm < newton_tolerance)
+                break;
+
+              // Adaptive damping (Armijo-like)
+              if (newton_iter > 0 && residual_norm > 0.99 * previous_residual)
+                damping = std::max(0.05, damping * 0.5);
+              else if (residual_norm < 0.5 * previous_residual &&
+                       damping < 1.0 - 1e-12)
+                damping = std::min(1.0, damping * 1.5);
+              previous_residual = residual_norm;
+
+              solution_backup = solution_owned;
+
+              bool linear_solve_ok = true;
+              try
+                {
+                  solve_newton_system();
+                }
+              catch (const std::exception &)
+                {
+                  pcout << "(linfail)" << std::flush;
+                  linear_solve_ok = false;
+                  damping = std::max(0.05, damping * 0.25);
+                }
+
+              // Apply Newton update with damping
+              solution_owned = current_solution;
+              solution_owned.add(damping, newton_update);
+              current_solution = solution_owned;
+
+              // Backtracking on linear failure
+              if (!linear_solve_ok)
+                {
+                  assemble_newton_system();
+                  const double new_res = system_rhs.l2_norm();
+                  if (new_res > 2.0 * residual_norm)
+                    {
+                      solution_owned   = solution_backup;
+                      current_solution = solution_owned;
+                      damping = std::max(0.01, damping * 0.5);
+                      solution_owned.add(damping, newton_update);
+                      current_solution = solution_owned;
+                    }
+                }
+
+              newton_iter++;
             }
 
-          // Apply Newton update with damping
-          solution_owned = current_solution;
-          solution_owned.add(damping, newton_update);
-          current_solution = solution_owned;
-
-          newton_iter++;
+          pcout << " Newton: " << newton_iter
+                << " iters, res=" << residual_norm;
+          if (residual_norm > newton_tolerance)
+            pcout << " WARNING: Newton did NOT converge!";
+          pcout << std::endl;
         }
-      
-      pcout << " Newton: " << newton_iter << " iters, res=" << residual_norm << std::endl;
+      // Linearized Approach
+      else 
+        {
+          assemble_linearized_system();
+          solve_linear_system();
+          current_solution = solution_owned;
+        }
 
-      if (mpi_rank == 0) pcout << std::endl;
+      // Shift time levels
+      solution_old_old = solution_old;
+      solution_old     = current_solution;
+      first_step       = false;
 
-      solution_old = current_solution;
-
-      // Benchmark quantities calculation
-      double drag, lift, delta_p;
+      // Benchmark quantities
+      double drag = 0.0, lift = 0.0;
       compute_lift_drag(drag, lift);
-      delta_p = compute_pressure_difference();
+      const double delta_p = compute_pressure_difference();
+
+      pcout << "  Cd=" << drag << "  Cl=" << lift
+            << "  dP=" << delta_p << std::endl;
 
       if (mpi_rank == 0)
         {
-           forces_file << time << "\t" << drag << "\t" << lift << "\t" << delta_p << std::endl;
-           forces_file.flush();
+          forces_file << time << "\t" << drag << "\t" << lift << "\t"
+                      << delta_p << std::endl;
+          forces_file.flush();
         }
 
-      // Output frequency - Test: output every step
-      if (time_step % 1 == 0) 
+      // VTU output at regular intervals
+      if (time_step % output_every == 0)
         output(time_step);
     }
+
+  pcout << "===============================================" << std::endl;
+  pcout << "Simulation complete." << std::endl;
 }
 
 // Explicit instantiation
