@@ -66,32 +66,31 @@ NavierStokesCN<dim>::assemble_system()
   // here we solve for u^{n+1} directly with the actual Dirichlet values.
   const ComponentMask velocity_mask = this->fe->component_mask(velocities);
 
-  AffineConstraints<double> constraints;
-  constraints.clear();
-  constraints.reinit(this->locally_relevant_dofs);
+  cn_constraints.clear();
+  cn_constraints.reinit(this->locally_relevant_dofs);
 
   // Inlet: parabolic profile at t^{n+1}
   VectorTools::interpolate_boundary_values(*this->mapping,
                                            this->dof_handler,
                                            this->inlet_boundary_id,
                                            *this->inlet_velocity,
-                                           constraints,
+                                           cn_constraints,
                                            velocity_mask);
   // Walls: no-slip
   VectorTools::interpolate_boundary_values(*this->mapping,
                                            this->dof_handler,
                                            this->wall_boundary_id,
                                            Functions::ZeroFunction<dim>(dim + 1),
-                                           constraints,
+                                           cn_constraints,
                                            velocity_mask);
   // Cylinder: no-slip
   VectorTools::interpolate_boundary_values(*this->mapping,
                                            this->dof_handler,
                                            this->cylinder_boundary_id,
                                            Functions::ZeroFunction<dim>(dim + 1),
-                                           constraints,
+                                           cn_constraints,
                                            velocity_mask);
-  constraints.close();
+  cn_constraints.close();
 
   // ---- Cell loop ----
   for (const auto &cell : this->dof_handler.active_cell_iterators())
@@ -192,12 +191,12 @@ NavierStokesCN<dim>::assemble_system()
       // distribute_local_to_global handles non-homogeneous constraints:
       // it modifies both matrix and RHS so that constrained (Dirichlet)
       // DOFs are set to the prescribed boundary values.
-      constraints.distribute_local_to_global(cell_matrix,
+      cn_constraints.distribute_local_to_global(cell_matrix,
                                              cell_rhs,
                                              local_dof_indices,
                                              this->system_matrix,
                                              this->system_rhs);
-      constraints.distribute_local_to_global(cell_pressure_mass,
+      cn_constraints.distribute_local_to_global(cell_pressure_mass,
                                              local_dof_indices,
                                              this->pressure_mass);
     }
@@ -245,6 +244,9 @@ NavierStokesCN<dim>::solve_system()
                this->solution_owned,
                this->system_rhs,
                preconditioner);
+
+  // Enforce constraints exactly on the solution
+  cn_constraints.distribute(this->solution_owned);
 
   this->pcout << "  GMRES: " << solver_control.last_step()
               << " iterations" << std::endl;

@@ -32,6 +32,8 @@
 #include <deal.II/lac/trilinos_precondition.h>
 #include <deal.II/lac/trilinos_sparse_matrix.h>
 
+#include <deal.II/lac/sparsity_tools.h>
+
 #include <deal.II/numerics/data_out.h>
 #include <deal.II/numerics/matrix_tools.h>
 #include <deal.II/numerics/vector_tools.h>
@@ -482,6 +484,9 @@ protected:
 
   TrilinosWrappers::MPI::BlockVector newton_update;
   TrilinosWrappers::MPI::BlockVector current_solution;
+
+  // Homogeneous Dirichlet constraints for Newton updates (built once in setup)
+  AffineConstraints<double> newton_constraints;
 };
 
 #endif

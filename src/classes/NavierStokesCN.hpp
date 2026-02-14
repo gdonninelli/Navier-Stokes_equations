@@ -55,6 +55,9 @@ protected:
   // Extra vector for 2nd-order extrapolation: u^{n-1}
   TrilinosWrappers::MPI::BlockVector solution_old_old;
 
+  // Constraints for the current time step (non-homogeneous Dirichlet)
+  AffineConstraints<double> cn_constraints;
+
   // Flag: first time step uses 1st-order extrapolation (u* = u^n)
   bool first_step = true;
 };

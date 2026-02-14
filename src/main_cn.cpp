@@ -1,4 +1,4 @@
-#include "NavierStokesCN.hpp"
+#include "classes/NavierStokesCN.hpp"
 
 // ============================================================================
 // main_cn.cc — Navier-Stokes with Crank-Nicolson semi-implicit scheme

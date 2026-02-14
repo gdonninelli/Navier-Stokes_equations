@@ -217,15 +217,53 @@ void NavierStokes<dim>::setup()
   
   // TODO: Maybe set initial condition here (understand if it's nedeed)
 
-  // 6. Matrices initialization
-  // Block dynamic sparsity pattern
-  BlockDynamicSparsityPattern bdsp(block_relevant_dofs);
-  DoFTools::make_sparsity_pattern(dof_handler, bdsp);
+  // 6. Build constraints for Newton updates (homogeneous Dirichlet on velocity)
+  //    These are also needed to build a correct sparsity pattern for MPI.
+  {
+    const FEValuesExtractors::Vector velocities_ext(0);
+    const ComponentMask vel_mask = fe->component_mask(velocities_ext);
 
+    newton_constraints.clear();
+    newton_constraints.reinit(locally_relevant_dofs);
+    VectorTools::interpolate_boundary_values(*mapping,
+                                             dof_handler,
+                                             inlet_boundary_id,
+                                             Functions::ZeroFunction<dim>(dim + 1),
+                                             newton_constraints,
+                                             vel_mask);
+    VectorTools::interpolate_boundary_values(*mapping,
+                                             dof_handler,
+                                             wall_boundary_id,
+                                             Functions::ZeroFunction<dim>(dim + 1),
+                                             newton_constraints,
+                                             vel_mask);
+    VectorTools::interpolate_boundary_values(*mapping,
+                                             dof_handler,
+                                             cylinder_boundary_id,
+                                             Functions::ZeroFunction<dim>(dim + 1),
+                                             newton_constraints,
+                                             vel_mask);
+    newton_constraints.close();
+  }
 
-  // TODO: Stesso problema per la mesh
-  system_matrix.reinit(block_owned_dofs, bdsp, MPI_COMM_WORLD);
-  pressure_mass.reinit(block_owned_dofs, bdsp, MPI_COMM_WORLD);
+  // 7. Matrices initialization
+  //    Block sparsity pattern: pass constraints + distribute for MPI correctness.
+  //    Without distribute_sparsity_pattern, off-process matrix entries are
+  //    silently dropped by Trilinos during compress(), producing an incorrect
+  //    Jacobian when running on multiple MPI ranks.
+  {
+    const std::vector<types::global_dof_index> dofs_per_block_sizes = {n_u, n_p};
+    BlockDynamicSparsityPattern bdsp(dofs_per_block_sizes, dofs_per_block_sizes);
+    DoFTools::make_sparsity_pattern(dof_handler, bdsp, newton_constraints, false);
+    SparsityTools::distribute_sparsity_pattern(
+      bdsp,
+      Utilities::MPI::all_gather(MPI_COMM_WORLD, locally_owned_dofs),
+      MPI_COMM_WORLD,
+      locally_relevant_dofs);
+
+    system_matrix.reinit(block_owned_dofs, bdsp, MPI_COMM_WORLD);
+    pressure_mass.reinit(block_owned_dofs, bdsp, MPI_COMM_WORLD);
+  }
 
   pcout << "Setup complete." << std::endl;
 }
@@ -271,35 +309,8 @@ void NavierStokes<dim>::assemble_newton_system()
   std::vector<Tensor<2, dim>> grad_phi_u(dofs_per_cell);
   std::vector<double>         phi_p(dofs_per_cell);
 
-  // Homogeneous constraints for the Newton UPDATE δu.
-  // Only velocity DOFs are constrained (δu_velocity = 0 on Dirichlet
-  // boundaries).  Pressure must NOT be constrained here: it has no
-  // Dirichlet condition and over-constraining it leads to a singular
-  // or trivially-zero solution.
-  const ComponentMask velocity_mask = fe->component_mask(velocities);
-
-  AffineConstraints<double> constraints;
-  constraints.clear();
-  constraints.reinit(locally_relevant_dofs);
-  VectorTools::interpolate_boundary_values(*mapping,
-                                           dof_handler,
-                                           inlet_boundary_id,
-                                           Functions::ZeroFunction<dim>(dim + 1),
-                                           constraints,
-                                           velocity_mask);
-  VectorTools::interpolate_boundary_values(*mapping,
-                                           dof_handler,
-                                           wall_boundary_id,
-                                           Functions::ZeroFunction<dim>(dim + 1),
-                                           constraints,
-                                           velocity_mask);
-  VectorTools::interpolate_boundary_values(*mapping,
-                                           dof_handler,
-                                           cylinder_boundary_id,
-                                           Functions::ZeroFunction<dim>(dim + 1),
-                                           constraints,
-                                           velocity_mask);
-  constraints.close();
+  // Use the pre-built newton_constraints (homogeneous Dirichlet on velocity)
+  // built once in setup(). This ensures consistency with the sparsity pattern.
 
   for (const auto &cell : dof_handler.active_cell_iterators())
     {
@@ -383,8 +394,8 @@ void NavierStokes<dim>::assemble_newton_system()
 
           cell->get_dof_indices(local_dof_indices);
 
-          constraints.distribute_local_to_global(cell_matrix, cell_rhs, local_dof_indices, system_matrix, system_rhs);
-          constraints.distribute_local_to_global(cell_pressure_mass, local_dof_indices, pressure_mass);
+          newton_constraints.distribute_local_to_global(cell_matrix, cell_rhs, local_dof_indices, system_matrix, system_rhs);
+          newton_constraints.distribute_local_to_global(cell_pressure_mass, local_dof_indices, pressure_mass);
         }
     }
 
@@ -420,6 +431,11 @@ void NavierStokes<dim>::solve_newton_system()
   // Solve for newton_update (delta u)
   newton_update = 0.0;
   solver.solve(system_matrix, newton_update, system_rhs, preconditioner);
+
+  // Enforce constraints exactly on the Newton update.
+  // Without this, constrained DOFs may have small non-zero values
+  // that accumulate over Newton iterations in parallel.
+  newton_constraints.distribute(newton_update);
 }
 
 // --- ADDED FUNCTION FOR PRESSURE DROP CALCULATION ---
