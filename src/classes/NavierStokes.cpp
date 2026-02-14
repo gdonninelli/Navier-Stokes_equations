@@ -207,6 +207,7 @@ void NavierStokes<dim>::setup()
   solution_owned.reinit(block_owned_dofs, MPI_COMM_WORLD);
   system_rhs.reinit(block_owned_dofs, MPI_COMM_WORLD);
   newton_update.reinit(block_owned_dofs, MPI_COMM_WORLD);
+  solution_backup.reinit(block_owned_dofs, MPI_COMM_WORLD);
 
   // solution, solution_old, current_solution: contain also ghost DoFs (for assembly)
   solution.reinit(block_owned_dofs, block_relevant_dofs, MPI_COMM_WORLD);
@@ -280,18 +281,17 @@ void NavierStokes<dim>::assemble_newton_system()
 {
   system_matrix = 0;
   system_rhs    = 0;
-  pressure_mass = 0; // TODO: Recompute if necessary (maybe)
-
-  const QGaussSimplex<dim> quadrature_formula(degree_velocity + 1);
+  if (!pressure_mass_assembled)
+    pressure_mass = 0;
 
   FEValues<dim> fe_values(*mapping,
                           *fe,
-                          quadrature_formula,
+                          *quadrature,
                           update_values | update_gradients |
-                            update_quadrature_points | update_JxW_values); // as usual
+                            update_quadrature_points | update_JxW_values);
 
   const unsigned int dofs_per_cell = fe->dofs_per_cell;
-  const unsigned int n_q_points    = quadrature_formula.size();
+  const unsigned int n_q_points    = quadrature->size();
 
   FullMatrix<double> cell_matrix(dofs_per_cell, dofs_per_cell);
   FullMatrix<double> cell_pressure_mass(dofs_per_cell, dofs_per_cell); 
@@ -315,6 +315,10 @@ void NavierStokes<dim>::assemble_newton_system()
   std::vector<Tensor<1, dim>> phi_u(dofs_per_cell);
   std::vector<Tensor<2, dim>> grad_phi_u(dofs_per_cell);
   std::vector<double>         phi_p(dofs_per_cell);
+
+  // Forcing term evaluation vectors
+  Vector<double> f_val_new(dim + 1);
+  Vector<double> f_val_old(dim + 1);
 
   // Use the pre-built newton_constraints (homogeneous Dirichlet on velocity)
   // built once in setup(). This ensures consistency with the sparsity pattern.
@@ -349,6 +353,19 @@ void NavierStokes<dim>::assemble_newton_system()
                   phi_p[k]      = fe_values[pressure].value(k, q);
                 }
 
+              // Evaluate forcing term at t^{n+1} and t^n
+              const auto &x_q = fe_values.quadrature_point(q);
+              forcing_term->set_time(time);
+              forcing_term->vector_value(x_q, f_val_new);
+              forcing_term->set_time(time - deltat);
+              forcing_term->vector_value(x_q, f_val_old);
+              Tensor<1, dim> f_new, f_old;
+              for (unsigned int d = 0; d < dim; ++d)
+                {
+                  f_new[d] = f_val_new[d];
+                  f_old[d] = f_val_old[d];
+                }
+
               for (unsigned int i = 0; i < dofs_per_cell; ++i)
                 {
                   // Residual with theta-method (theta=1 BE, theta=0.5 CN)
@@ -372,6 +389,8 @@ void NavierStokes<dim>::assemble_newton_system()
 
                   cell_rhs(i) += (-time_term - conv_impl - visc_impl - conv_expl - visc_expl - pres_term - div_term) * JxW;
 
+                  // Forcing term: +theta * f^{n+1} . phi + (1-theta) * f^n . phi
+                  cell_rhs(i) += (theta * (f_new * phi_u[i]) + (1.0 - theta) * (f_old * phi_u[i])) * JxW;
 
                   // Newton Jacobian with theta-method
                   for (unsigned int j = 0; j < dofs_per_cell; ++j)
@@ -393,7 +412,8 @@ void NavierStokes<dim>::assemble_newton_system()
                       cell_matrix(i, j) += val * JxW;
 
                       // Pressure mass matrix for preconditioner
-                      cell_pressure_mass(i, j) += phi_p[i] * phi_p[j] * JxW;
+                      if (!pressure_mass_assembled)
+                        cell_pressure_mass(i, j) += phi_p[i] * phi_p[j] * JxW;
                     }
                 }
             }
@@ -401,13 +421,18 @@ void NavierStokes<dim>::assemble_newton_system()
           cell->get_dof_indices(local_dof_indices);
 
           newton_constraints.distribute_local_to_global(cell_matrix, cell_rhs, local_dof_indices, system_matrix, system_rhs);
-          newton_constraints.distribute_local_to_global(cell_pressure_mass, local_dof_indices, pressure_mass);
+          if (!pressure_mass_assembled)
+            newton_constraints.distribute_local_to_global(cell_pressure_mass, local_dof_indices, pressure_mass);
         }
     }
 
   system_matrix.compress(VectorOperation::add);
   system_rhs.compress(VectorOperation::add);
-  pressure_mass.compress(VectorOperation::add);
+  if (!pressure_mass_assembled)
+    {
+      pressure_mass.compress(VectorOperation::add);
+      pressure_mass_assembled = true;
+    }
 }
 
 
@@ -448,18 +473,17 @@ void NavierStokes<dim>::assemble_linearized_system()
 {
   system_matrix  = 0;
   system_rhs     = 0;
-  pressure_mass  = 0;
-
-  const QGaussSimplex<dim> quadrature_formula(degree_velocity + 1);
+  if (!pressure_mass_assembled)
+    pressure_mass  = 0;
 
   FEValues<dim> fe_values(*mapping,
                           *fe,
-                          quadrature_formula,
+                          *quadrature,
                           update_values | update_gradients |
                             update_quadrature_points | update_JxW_values);
 
   const unsigned int dofs_per_cell = fe->dofs_per_cell;
-  const unsigned int n_q_points    = quadrature_formula.size();
+  const unsigned int n_q_points    = quadrature->size();
 
   FullMatrix<double> cell_matrix(dofs_per_cell, dofs_per_cell);
   FullMatrix<double> cell_pressure_mass(dofs_per_cell, dofs_per_cell);
@@ -479,6 +503,10 @@ void NavierStokes<dim>::assemble_linearized_system()
   std::vector<Tensor<1, dim>> phi_u(dofs_per_cell);
   std::vector<Tensor<2, dim>> grad_phi_u(dofs_per_cell);
   std::vector<double>         phi_p(dofs_per_cell);
+
+  // Forcing term evaluation vectors
+  Vector<double> f_val_new(dim + 1);
+  Vector<double> f_val_old(dim + 1);
 
   // Build non-homogeneous constraints for this time step
   const ComponentMask velocity_mask = fe->component_mask(velocities);
@@ -541,6 +569,19 @@ void NavierStokes<dim>::assemble_linearized_system()
               phi_p[k]      = fe_values[pressure].value(k, q);
             }
 
+          // Evaluate forcing term at t^{n+1} and t^n
+          const auto &x_q = fe_values.quadrature_point(q);
+          forcing_term->set_time(time);
+          forcing_term->vector_value(x_q, f_val_new);
+          forcing_term->set_time(time - deltat);
+          forcing_term->vector_value(x_q, f_val_old);
+          Tensor<1, dim> f_new, f_old;
+          for (unsigned int d = 0; d < dim; ++d)
+            {
+              f_new[d] = f_val_new[d];
+              f_old[d] = f_val_old[d];
+            }
+
           for (unsigned int i = 0; i < dofs_per_cell; ++i)
             {
               // RHS: explicit contributions from time n
@@ -559,6 +600,9 @@ void NavierStokes<dim>::assemble_linearized_system()
                 ((old_velocity_values[q] * old_velocity_gradients[q]) * phi_u[i]);
 
               cell_rhs(i) += (rhs_mass + rhs_visc + rhs_conv) * JxW;
+
+              // Forcing term: +theta * f^{n+1} . phi + (1-theta) * f^n . phi
+              cell_rhs(i) += (theta * (f_new * phi_u[i]) + (1.0 - theta) * (f_old * phi_u[i])) * JxW;
 
               // LHS: matrix entries
               for (unsigned int j = 0; j < dofs_per_cell; ++j)
@@ -581,7 +625,8 @@ void NavierStokes<dim>::assemble_linearized_system()
                   cell_matrix(i, j) += val * JxW;
 
                   // Pressure mass for preconditioner
-                  cell_pressure_mass(i, j) += phi_p[i] * phi_p[j] * JxW;
+                  if (!pressure_mass_assembled)
+                    cell_pressure_mass(i, j) += phi_p[i] * phi_p[j] * JxW;
                 }
             }
         }
@@ -593,14 +638,19 @@ void NavierStokes<dim>::assemble_linearized_system()
                                                      local_dof_indices,
                                                      system_matrix,
                                                      system_rhs);
-      system_constraints.distribute_local_to_global(cell_pressure_mass,
-                                                     local_dof_indices,
-                                                     pressure_mass);
+      if (!pressure_mass_assembled)
+        system_constraints.distribute_local_to_global(cell_pressure_mass,
+                                                       local_dof_indices,
+                                                       pressure_mass);
     }
 
   system_matrix.compress(VectorOperation::add);
   system_rhs.compress(VectorOperation::add);
-  pressure_mass.compress(VectorOperation::add);
+  if (!pressure_mass_assembled)
+    {
+      pressure_mass.compress(VectorOperation::add);
+      pressure_mass_assembled = true;
+    }
 }
 
 template <unsigned int dim>
@@ -630,11 +680,12 @@ void NavierStokes<dim>::solve_linear_system()
   pcout << "  GMRES: " << solver_control.last_step() << " iters" << std::endl;
 }
 
-// ?? Capire come modificare questa funzione in maniera più generale
-// serve a calcolare la differenza di pressione tra due punti (p_front e p_end) e mi baso sul paper
+// Compute pressure difference between front and back of the cylinder.
+// Robust MPI handling: tracks which ranks found the point to avoid
+// silent errors (no rank finds it) or double-counting (multiple ranks find it).
 template <unsigned int dim>
 double NavierStokes<dim>::compute_pressure_difference() 
-{    
+{
     Point<dim> p_front, p_end;
     if (dim == 2) {
         p_front = Point<dim>(0.15, 0.2);
@@ -644,37 +695,38 @@ double NavierStokes<dim>::compute_pressure_difference()
         p_end   = Point<dim>(0.55, 0.2, 0.205);
     }
 
-    double press_front = 0.0;
-    double press_end   = 0.0;
+    // Helper lambda: evaluate pressure at a point robustly across MPI ranks
+    auto evaluate_pressure = [&](const Point<dim> &pt) -> double
+    {
+      double local_press = 0.0;
+      int    found       = 0;
+      try
+        {
+          Vector<double> value(dim + 1);
+          VectorTools::point_value(*mapping, dof_handler, current_solution, pt, value);
+          local_press = value[dim];
+          found       = 1;
+        }
+      catch (...)
+        {
+          local_press = 0.0;
+          found       = 0;
+        }
 
-    // Use VectorTools::point_value. 
-    // Note: throws exception if the point is not in the local cell.
-    
-    // Front pressure
-    try {
-        // Extract pressure component (dim)
-        Vector<double> value(dim+1);
-        VectorTools::point_value(*mapping, dof_handler, current_solution, p_front, value);
-        press_front = value[dim];
-    } catch (...) {
-        // Point not in this process
-        press_front = 0.0;
-    }
+      // Gather across all ranks
+      const int    total_found  = Utilities::MPI::sum(found, MPI_COMM_WORLD);
+      const double global_press = Utilities::MPI::sum(local_press, MPI_COMM_WORLD);
 
-    // End pressure
-    try {
-        Vector<double> value(dim+1);
-        VectorTools::point_value(*mapping, dof_handler, current_solution, p_end, value);
-        press_end = value[dim];
-    } catch (...) {
-        press_end = 0.0;
-    }
+      if (total_found > 0)
+        return global_press / total_found;
+      else
+        {
+          pcout << "  WARNING: pressure evaluation point not found by any rank!" << std::endl;
+          return 0.0;
+        }
+    };
 
-    // MPI sum to get the value from the process that found it
-    press_front = Utilities::MPI::sum(press_front, MPI_COMM_WORLD);
-    press_end   = Utilities::MPI::sum(press_end, MPI_COMM_WORLD);
-
-    return press_front - press_end;
+    return evaluate_pressure(p_front) - evaluate_pressure(p_end);
 }
 
 
@@ -805,12 +857,13 @@ void NavierStokes<dim>::run()
 {
   setup();
 
-  // Solution initialization — start from rest
+  // Solution initialization from initial condition
   inlet_velocity->set_time(0.0);
+  initial_condition->set_time(0.0);
 
   VectorTools::interpolate(*mapping,
                            dof_handler,
-                           Functions::ZeroFunction<dim>(dim + 1),
+                           *initial_condition,
                            solution_owned);
   solution         = solution_owned;
   solution_old     = solution;
@@ -818,7 +871,7 @@ void NavierStokes<dim>::run()
   current_solution = solution;
   first_step       = true;
 
-  double       time      = 0.0;
+  time             = 0.0;
   unsigned int time_step = 0;
 
   // Output interval: approximately every 0.1 seconds
@@ -840,8 +893,9 @@ void NavierStokes<dim>::run()
 
       pcout << "Time step " << time_step << " at t=" << time << std::flush;
 
-      // Update BC to t^{n+1}
+      // Update BC and forcing to t^{n+1}
       inlet_velocity->set_time(time);
+      forcing_term->set_time(time);
 
       // Newton Approach
       if (nonlinear_method == NonlinearMethod::Newton)
@@ -886,9 +940,6 @@ void NavierStokes<dim>::run()
           double       previous_residual = 1e10;
           unsigned int newton_iter       = 0;
           double       damping           = 1.0;
-
-          TrilinosWrappers::MPI::BlockVector solution_backup;
-          solution_backup.reinit(block_owned_dofs, MPI_COMM_WORLD);
 
           while (residual_norm > newton_tolerance &&
                  newton_iter < newton_max_iterations)

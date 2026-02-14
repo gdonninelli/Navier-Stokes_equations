@@ -531,9 +531,15 @@ protected:
   TrilinosWrappers::MPI::BlockVector newton_update;
   TrilinosWrappers::MPI::BlockVector current_solution;
 
+  // Backup vector for Newton damping (avoids reallocation every time step)
+  TrilinosWrappers::MPI::BlockVector solution_backup;
+
   // For CN: u^{n-1} (needed for 2nd-order extrapolation of transport velocity)
   TrilinosWrappers::MPI::BlockVector solution_old_old;
   bool first_step = true;
+
+  // Flag: pressure mass matrix only needs to be assembled once (mesh-dependent only)
+  bool pressure_mass_assembled = false;
 
   // Homogeneous Dirichlet constraints for Newton updates (built once in setup)
   AffineConstraints<double> newton_constraints;

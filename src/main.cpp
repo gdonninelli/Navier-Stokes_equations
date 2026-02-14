@@ -30,7 +30,7 @@ int main(int argc, char *argv[])
     const double deltat = -1.0;
 
     // Mesh file
-    const std::string mesh_file_name = "../meshes/mesh-2D";
+    const std::string mesh_file_name = "../meshes/mesh-2D-100";
 
     NavierStokes<dim> solver(mesh_file_name,
                               degree_velocity,
