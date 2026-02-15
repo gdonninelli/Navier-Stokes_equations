@@ -18,8 +18,8 @@ $(BUILD_DIR)/Makefile: CMakeLists.txt
 
 # Convenience target to run the executable
 run: all
-	@echo "Running simulation..."
-	@cd $(BUILD_DIR) && ./navier_stokes
+	@echo "Running simulation with 8 MPI processes..."
+	@cd $(BUILD_DIR) && mpirun -np 8 ./navier_stokes
 
 # Clean the build directory
 clean:
