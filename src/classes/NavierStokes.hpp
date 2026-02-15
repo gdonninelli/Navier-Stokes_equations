@@ -44,6 +44,7 @@
 #include <iostream>
 #include <memory>
 #include <sstream>
+#include <iomanip>
 
 using namespace dealii;
 
@@ -592,6 +593,12 @@ protected:
 
   // Non-homogeneous Dirichlet constraints for linearized approach (rebuilt each step)
   AffineConstraints<double> system_constraints;
+
+  // PVD record: stores (time, filename) pairs for ParaView collection
+  std::vector<std::pair<double, std::string>> pvd_records;
+
+  // Write PVD file collecting all time steps
+  void write_pvd_file() const;
 };
 
 #endif
