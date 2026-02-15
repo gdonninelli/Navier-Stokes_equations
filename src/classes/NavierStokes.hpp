@@ -39,6 +39,7 @@
 #include <deal.II/numerics/vector_tools.h>
 
 #include <cmath>
+#include <chrono>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -307,6 +308,8 @@ public:
       amg_data.aggregation_threshold = 0.02;
       preconditioner_velocity.initialize(velocity_stiffness_, amg_data);
       preconditioner_pressure.initialize(pressure_mass_);
+
+      tmp_initialized = false;
     }
 
     void
@@ -317,7 +320,12 @@ public:
       preconditioner_velocity.vmult(dst.block(0), src.block(0));
 
       // Step 2: Compute  tmp = g - D x  (= g - B*dst0)
-      tmp.reinit(src.block(1));
+      // Lazy-init tmp from src to guarantee Epetra_Map compatibility
+      if (!tmp_initialized)
+        {
+          tmp.reinit(src.block(1));
+          tmp_initialized = true;
+        }
       B->vmult(tmp, dst.block(0));       // tmp = D x
       tmp.sadd(-1.0, src.block(1));      // tmp = g - D x
 
@@ -338,6 +346,7 @@ public:
     double pressure_scaling = 1.0;
 
     mutable TrilinosWrappers::MPI::Vector tmp;
+    mutable bool tmp_initialized = false;
   };
 
   // ==========================================================================

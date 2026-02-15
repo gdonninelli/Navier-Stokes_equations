@@ -311,17 +311,11 @@ void NavierStokes<dim>::assemble_newton_system()
   std::vector<Tensor<1, dim>> old_velocity_values(n_q_points);
   std::vector<Tensor<2, dim>> old_velocity_gradients(n_q_points); // needed for CN (theta<1)
 
-  // Support vectors for phi_u, grad_phi_u, phi_p
+  // Support vectors for phi_u, grad_phi_u, div_phi_u, phi_p
   std::vector<Tensor<1, dim>> phi_u(dofs_per_cell);
   std::vector<Tensor<2, dim>> grad_phi_u(dofs_per_cell);
+  std::vector<double>         div_phi_u(dofs_per_cell);
   std::vector<double>         phi_p(dofs_per_cell);
-
-  // Forcing term evaluation vectors
-  Vector<double> f_val_new(dim + 1);
-  Vector<double> f_val_old(dim + 1);
-
-  // Use the pre-built newton_constraints (homogeneous Dirichlet on velocity)
-  // built once in setup(). This ensures consistency with the sparsity pattern.
 
   for (const auto &cell : dof_handler.active_cell_iterators())
     {
@@ -345,25 +339,13 @@ void NavierStokes<dim>::assemble_newton_system()
             {
               const double JxW = fe_values.JxW(q);
 
-              // Precompute basis functions for efficiency
+              // Precompute basis functions + divergence (avoid recomputing in j-loop)
               for (unsigned int k = 0; k < dofs_per_cell; ++k)
                 {
                   phi_u[k]      = fe_values[velocities].value(k, q);
                   grad_phi_u[k] = fe_values[velocities].gradient(k, q);
+                  div_phi_u[k]  = fe_values[velocities].divergence(k, q);
                   phi_p[k]      = fe_values[pressure].value(k, q);
-                }
-
-              // Evaluate forcing term at t^{n+1} and t^n
-              const auto &x_q = fe_values.quadrature_point(q);
-              forcing_term->set_time(time);
-              forcing_term->vector_value(x_q, f_val_new);
-              forcing_term->set_time(time - deltat);
-              forcing_term->vector_value(x_q, f_val_old);
-              Tensor<1, dim> f_new, f_old;
-              for (unsigned int d = 0; d < dim; ++d)
-                {
-                  f_new[d] = f_val_new[d];
-                  f_old[d] = f_val_old[d];
                 }
 
               for (unsigned int i = 0; i < dofs_per_cell; ++i)
@@ -382,15 +364,12 @@ void NavierStokes<dim>::assemble_newton_system()
                   const double visc_expl = (1.0 - theta) * nu * scalar_product(old_velocity_gradients[q], grad_phi_u[i]);
 
                   // Pressure term: - p_k * div v (fully implicit)
-                  const double pres_term = -current_pressure_values[q] * fe_values[velocities].divergence(i, q);
+                  const double pres_term = -current_pressure_values[q] * div_phi_u[i];
                   
                   // Incompressibility term: - q * div u_k (fully implicit)
                   const double div_term = -phi_p[i] * trace(current_velocity_gradients[q]);
 
                   cell_rhs(i) += (-time_term - conv_impl - visc_impl - conv_expl - visc_expl - pres_term - div_term) * JxW;
-
-                  // Forcing term: +theta * f^{n+1} . phi + (1-theta) * f^n . phi
-                  cell_rhs(i) += (theta * (f_new * phi_u[i]) + (1.0 - theta) * (f_old * phi_u[i])) * JxW;
 
                   // Newton Jacobian with theta-method
                   for (unsigned int j = 0; j < dofs_per_cell; ++j)
@@ -404,10 +383,10 @@ void NavierStokes<dim>::assemble_newton_system()
                              (phi_u[j] * current_velocity_gradients[q]) * phi_u[i]);
 
                       // Pressure: -(p, div v)
-                      val -= phi_p[j] * fe_values[velocities].divergence(i, q);
+                      val -= phi_p[j] * div_phi_u[i];
 
                       // Divergence: -(q, div u)
-                      val -= phi_p[i] * fe_values[velocities].divergence(j, q);
+                      val -= phi_p[i] * div_phi_u[j];
 
                       cell_matrix(i, j) += val * JxW;
 
@@ -456,14 +435,16 @@ void NavierStokes<dim>::solve_newton_system()
                             system_matrix.block(1, 0),
                             pressure_scaling);
 
-  // GMRES con restart=300 per sistemi saddle-point
+  // GMRES con restart=150 per sistemi saddle-point
   typename SolverGMRES<TrilinosWrappers::MPI::BlockVector>::AdditionalData
-    gmres_data(300 /*restart after*/);
+    gmres_data(150);
   SolverGMRES<TrilinosWrappers::MPI::BlockVector> solver(solver_control, gmres_data);
 
   // Solve for newton_update (delta u)
   newton_update = 0.0;
   solver.solve(system_matrix, newton_update, system_rhs, preconditioner);
+
+  pcout << "  GMRES (Newton): " << solver_control.last_step() << " iters" << std::endl;
 
   newton_constraints.distribute(newton_update);
 }
@@ -502,6 +483,7 @@ void NavierStokes<dim>::assemble_linearized_system()
   // Basis functions
   std::vector<Tensor<1, dim>> phi_u(dofs_per_cell);
   std::vector<Tensor<2, dim>> grad_phi_u(dofs_per_cell);
+  std::vector<double>         div_phi_u(dofs_per_cell);
   std::vector<double>         phi_p(dofs_per_cell);
 
   // Forcing term evaluation vectors
@@ -561,11 +543,12 @@ void NavierStokes<dim>::assemble_linearized_system()
             u_star = 2.0 * old_velocity_values[q]
                      - old_old_velocity_values[q];    // 2nd-order: u* = 2u^n - u^{n-1}
 
-          // Precompute basis functions
+          // Precompute basis functions + divergence
           for (unsigned int k = 0; k < dofs_per_cell; ++k)
             {
               phi_u[k]      = fe_values[velocities].value(k, q);
               grad_phi_u[k] = fe_values[velocities].gradient(k, q);
+              div_phi_u[k]  = fe_values[velocities].divergence(k, q);
               phi_p[k]      = fe_values[pressure].value(k, q);
             }
 
@@ -617,10 +600,10 @@ void NavierStokes<dim>::assemble_linearized_system()
                   val += theta * (u_star * grad_phi_u[j]) * phi_u[i];
 
                   // Pressure: -(psi_j, div phi_i)
-                  val -= phi_p[j] * fe_values[velocities].divergence(i, q);
+                  val -= phi_p[j] * div_phi_u[i];
 
                   // Divergence: -(psi_i, div phi_j)
-                  val -= phi_p[i] * fe_values[velocities].divergence(j, q);
+                  val -= phi_p[i] * div_phi_u[j];
 
                   cell_matrix(i, j) += val * JxW;
 
@@ -669,7 +652,7 @@ bool NavierStokes<dim>::solve_linear_system()
                             pressure_scaling);
 
   typename SolverGMRES<TrilinosWrappers::MPI::BlockVector>::AdditionalData
-    gmres_data(300);
+    gmres_data(150);
   SolverGMRES<TrilinosWrappers::MPI::BlockVector> solver(solver_control, gmres_data);
 
   solution_owned = 0.0;
@@ -943,6 +926,8 @@ void NavierStokes<dim>::run()
       inlet_velocity->set_time(time);
       forcing_term->set_time(time);
 
+      auto wall_start = std::chrono::high_resolution_clock::now();
+
       // Newton Approach
       if (nonlinear_method == NonlinearMethod::Newton)
         {
@@ -1066,6 +1051,12 @@ void NavierStokes<dim>::run()
               // or let it continue and observe the results
             }
         }
+
+      {
+        auto wall_end = std::chrono::high_resolution_clock::now();
+        const double wall_sec = std::chrono::duration<double>(wall_end - wall_start).count();
+        pcout << "  Wall time: " << wall_sec << " s" << std::endl;
+      }
 
       // Shift time levels
       solution_old_old = solution_old;
