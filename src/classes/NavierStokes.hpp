@@ -46,9 +46,6 @@
 
 using namespace dealii;
 
-// ==========================================================================
-// Enums for method selection (used in main to configure the solver)
-// ==========================================================================
 enum class TimeScheme     { BackwardEuler, CrankNicolson };
 enum class NonlinearMethod { Newton, Linearized };
 
@@ -196,6 +193,32 @@ public:
 };
 
 
+// =========================================================================
+// Configuration struct for benchmark test cases.
+// Holds all parameters needed to construct a NavierStokes solver.
+// Populated by factory functions in TestCases.hpp.
+// =========================================================================
+template <unsigned int dim>
+struct BenchmarkTestCase
+{
+  std::string    name;
+  std::string    description;
+  std::string    mesh_file;
+  unsigned int   degree_velocity = 2;
+  unsigned int   degree_pressure = 1;
+  double         Re;
+  double         U_m;
+  double         T;
+  double         deltat;
+  TimeScheme     time_scheme;
+  NonlinearMethod nonlinear_method;
+  std::shared_ptr<Function<dim>> inlet_velocity;
+  std::shared_ptr<Function<dim>> dirichlet_bc;
+  std::shared_ptr<Function<dim>> forcing_term;
+  std::shared_ptr<Function<dim>> initial_condition;
+};
+
+
 template <unsigned int dim>
 class NavierStokes
 {
@@ -334,6 +357,19 @@ public:
     else if (Re <= 150) return 0.01;
     else                return 0.005;
   }
+
+  // -----------------------------------------------------------------------
+  // Constructor from BenchmarkTestCase (delegates to full constructor).
+  // Usage:  auto tc = TestCases::make_2D_3(mesh_file);
+  //         NavierStokes<2> solver(tc);
+  // -----------------------------------------------------------------------
+  NavierStokes(const BenchmarkTestCase<dim> &tc)
+    : NavierStokes(tc.mesh_file, tc.degree_velocity, tc.degree_pressure,
+                   tc.deltat, tc.T, tc.Re, tc.U_m,
+                   tc.time_scheme, tc.nonlinear_method,
+                   tc.inlet_velocity, tc.dirichlet_bc,
+                   tc.forcing_term, tc.initial_condition)
+  {}
 
   // -----------------------------------------------------------------------
   // Constructor.

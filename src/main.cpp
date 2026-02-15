@@ -1,4 +1,4 @@
-#include "classes/NavierStokes.hpp"
+#include "classes/TestCases.hpp"
 
 int main(int argc, char *argv[])
 {
@@ -8,40 +8,35 @@ int main(int argc, char *argv[])
 
     Utilities::MPI::MPI_InitFinalize mpi_initialization(argc, argv, 1);
 
-    // Spatial dimension (2 or 3)
-    const unsigned int dim = 2;
+    // Schäfer-Turek 1996 benchmark test cases.
+    //
+    // Available 2D cases (NavierStokes<2>):
+    //   TestCases::make_2D_1  — Steady,   Re=20,        U_m=0.3
+    //   TestCases::make_2D_2  — Unsteady, Re=100,       U_m=1.5  (constant inlet)
+    //   TestCases::make_2D_3  — Unsteady, Re(t)∈[0,100], U_m=1.5  (sin(πt/8))
+    //
+    // Available 3D cases (NavierStokes<3>):
+    //   TestCases::make_3D_1Z — Steady,   Re=20,        U_m=0.45
+    //   TestCases::make_3D_2Z — Unsteady, Re=100,       U_m=2.25 (constant inlet)
+    //   TestCases::make_3D_3Z — Unsteady, Re(t)∈[0,100], U_m=2.25 (sin(πt/8))
+    //
+    // Optional arguments (after mesh_file):
+    //   TimeScheme:      BackwardEuler / CrankNicolson
+    //   NonlinearMethod: Newton / Linearized
+    //   deltat:          positive value or <= 0 for automatic
 
-    // Taylor-Hood elements: P2/P1
-    const unsigned int degree_velocity = 2;
-    const unsigned int degree_pressure = 1;
+    const std::string mesh_2d = "../meshes/mesh-2D-40.msh";
+    // const std::string mesh_3d = "../meshes/mesh-3D.msh";
 
-    // Physical parameters
-    const double Re      = 40.0;
-    const double T_final = 8.0;
-    const double U_m     = 1.5; // Max inlet velocity
+    // auto tc = TestCases::make_2D_1(mesh_2d);
+    auto tc = TestCases::make_2D_2(mesh_2d);
+    // auto tc = TestCases::make_2D_3(mesh_2d);
 
-    // Time discretization:  TimeScheme::BackwardEuler  oppure  TimeScheme::CrankNicolson
-    // Nonlinear solver:     NonlinearMethod::Newton    oppure  NonlinearMethod::Linearized
-    const TimeScheme      time_scheme      = TimeScheme::CrankNicolson;
-    const NonlinearMethod nonlinear_method = NonlinearMethod::Newton;
+    // auto tc = TestCases::make_3D_1Z(mesh_3d);
+    // auto tc = TestCases::make_3D_2Z(mesh_3d);
+    // auto tc = TestCases::make_3D_3Z(mesh_3d);
 
-    // Time step: set a positive value to use manually, or <= 0 for automatic
-    // selection based on Re (Re<=20 -> 0.1, Re<=50 -> 0.05, Re<=100 -> 0.02, Re<=150 -> 0.01, Re>150 -> 0.005)
-    const double deltat = 1.0;
-
-    // Mesh file
-    const std::string mesh_file_name = "../meshes/mesh-2D-100.msh";
-
-    NavierStokes<dim> solver(mesh_file_name,
-                              degree_velocity,
-                              degree_pressure,
-                              deltat,
-                              T_final,
-                              Re,
-                              U_m,
-                              time_scheme,
-                              nonlinear_method);
-
+    NavierStokes<2> solver(tc);
     solver.run();
   }
   catch (std::exception &exc)
