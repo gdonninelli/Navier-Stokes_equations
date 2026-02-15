@@ -27,10 +27,10 @@ int main(int argc, char *argv[])
 
     // Time step: set a positive value to use manually, or <= 0 for automatic
     // selection based on Re (Re<=20 -> 0.1, Re<=50 -> 0.05, Re<=100 -> 0.02, Re<=150 -> 0.01, Re>150 -> 0.005)
-    const double deltat = -1.0;
+    const double deltat = 1.0;
 
     // Mesh file
-    const std::string mesh_file_name = "../meshes/mesh-2D-100";
+    const std::string mesh_file_name = "../meshes/mesh-2D-100.msh";
 
     NavierStokes<dim> solver(mesh_file_name,
                               degree_velocity,
