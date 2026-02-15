@@ -537,7 +537,8 @@ protected:
   assemble_linearized_system();
 
   // Solve the linearized system for u^{n+1} directly.
-  void
+  // Returns true if converged, false otherwise (does not throw on failure).
+  bool
   solve_linear_system();
 
   // FEM

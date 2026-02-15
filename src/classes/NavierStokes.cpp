@@ -654,7 +654,7 @@ void NavierStokes<dim>::assemble_linearized_system()
 }
 
 template <unsigned int dim>
-void NavierStokes<dim>::solve_linear_system()
+bool NavierStokes<dim>::solve_linear_system()
 {
   const double rhs_norm = system_rhs.l2_norm();
   // Use 1e-4 relative tolerance
@@ -673,11 +673,27 @@ void NavierStokes<dim>::solve_linear_system()
   SolverGMRES<TrilinosWrappers::MPI::BlockVector> solver(solver_control, gmres_data);
 
   solution_owned = 0.0;
-  solver.solve(system_matrix, solution_owned, system_rhs, preconditioner);
+
+  bool converged = true;
+  try
+    {
+      solver.solve(system_matrix, solution_owned, system_rhs, preconditioner);
+    }
+  catch (const SolverControl::NoConvergence &e)
+    {
+      converged = false;
+      pcout << "  WARNING: GMRES did NOT converge after "
+            << solver_control.last_step() << " iterations, "
+            << "residual = " << solver_control.last_value() << std::endl;
+      // Continue with the best approximation we have
+    }
 
   system_constraints.distribute(solution_owned);
 
-  pcout << "  GMRES: " << solver_control.last_step() << " iters" << std::endl;
+  if (converged)
+    pcout << "  GMRES: " << solver_control.last_step() << " iters" << std::endl;
+
+  return converged;
 }
 
 // Compute pressure difference between front and back of the cylinder.
@@ -1010,8 +1026,15 @@ void NavierStokes<dim>::run()
       else 
         {
           assemble_linearized_system();
-          solve_linear_system();
+          const bool gmres_converged = solve_linear_system();
           current_solution = solution_owned;
+
+          if (!gmres_converged)
+            {
+              pcout << "  Continuing with best available approximation..." << std::endl;
+              // The simulation continues - the user can decide to abort manually
+              // or let it continue and observe the results
+            }
         }
 
       // Shift time levels
