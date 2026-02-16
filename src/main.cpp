@@ -25,7 +25,7 @@ int main(int argc, char *argv[])
     //   NonlinearMethod: Newton / Linearized
     //   deltat:          positive value or <= 0 for automatic
 
-    const std::string mesh_2d = "../meshes/mesh-2D-40.msh";
+    const std::string mesh_2d = "../meshes/mesh-2D-200.msh";
     // const std::string mesh_3d = "../meshes/mesh-3D.msh";
 
     // auto tc = TestCases::make_2D_1(mesh_2d);

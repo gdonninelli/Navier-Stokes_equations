@@ -282,32 +282,55 @@ public:
   // The lower block-triangular preconditioner is:
   //   P = [A  0; D  C]   with  C ≈ S
   //
-  // For time-dependent NS:  A ≈ (rho/dt)M + nu K + conv,
-  // so  S ≈ -(dt/rho) M_p  and  C^{-1} should be  -(rho/dt) M_p^{-1}.
+  // For time-dependent NS:  A ≈ (rho/dt)M + theta*nu*K + conv.
   //
-  // We apply ILU(M_p)^{-1} and then multiply by pressure_scaling
-  // (which should be set to  -rho/dt  by the caller).
+  // Cahouet-Chabard Schur complement approximation:
+  //   S^{-1}  ≈  -(rho/dt) K_p^{-1}  -  theta*nu * M_p^{-1}
+  //
+  // where K_p is the pressure Laplacian (stiffness) and M_p is the
+  // pressure mass.  The first term captures the mass-dominated (low
+  // frequency) regime and the second the viscosity-dominated (high
+  // frequency) regime, giving mesh-independent GMRES iterations.
   class PreconditionBlockTriangular
   {
   public:
     void
     initialize(const TrilinosWrappers::SparseMatrix &velocity_stiffness_,
                const TrilinosWrappers::SparseMatrix &pressure_mass_,
+               const TrilinosWrappers::SparseMatrix &pressure_stiffness_,
                const TrilinosWrappers::SparseMatrix &B_,
-               const double                          pressure_scaling_ = 1.0)
+               const double nu_,
+               const double rho_,
+               const double deltat_,
+               const double theta_)
     {
       velocity_stiffness = &velocity_stiffness_;
       pressure_mass      = &pressure_mass_;
+      pressure_stiffness = &pressure_stiffness_;
       B                  = &B_;
-      pressure_scaling   = pressure_scaling_;
+      nu_val             = nu_;
+      rho_val            = rho_;
+      deltat_val         = deltat_;
+      theta_val          = theta_;
 
-      TrilinosWrappers::PreconditionAMG::AdditionalData amg_data;
-      amg_data.elliptic              = false;
-      amg_data.n_cycles              = 1;
-      amg_data.smoother_sweeps       = 3;
-      amg_data.aggregation_threshold = 0.02;
-      preconditioner_velocity.initialize(velocity_stiffness_, amg_data);
-      preconditioner_pressure.initialize(pressure_mass_);
+      // AMG for velocity block (convection-diffusion: non-elliptic)
+      TrilinosWrappers::PreconditionAMG::AdditionalData amg_data_vel;
+      amg_data_vel.elliptic              = false;
+      amg_data_vel.n_cycles              = 1;
+      amg_data_vel.smoother_sweeps       = 3;
+      amg_data_vel.aggregation_threshold = 0.02;
+      preconditioner_velocity.initialize(velocity_stiffness_, amg_data_vel);
+
+      // ILU for pressure mass M_p
+      preconditioner_pressure_mass.initialize(pressure_mass_);
+
+      // AMG for pressure Laplacian K_p (elliptic operator)
+      TrilinosWrappers::PreconditionAMG::AdditionalData amg_data_pres;
+      amg_data_pres.elliptic              = true;
+      amg_data_pres.n_cycles              = 1;
+      amg_data_pres.smoother_sweeps       = 2;
+      amg_data_pres.aggregation_threshold = 0.02;
+      preconditioner_pressure_lapl.initialize(pressure_stiffness_, amg_data_pres);
 
       tmp_initialized = false;
     }
@@ -324,15 +347,22 @@ public:
       if (!tmp_initialized)
         {
           tmp.reinit(src.block(1));
+          tmp2.reinit(src.block(1));
           tmp_initialized = true;
         }
       B->vmult(tmp, dst.block(0));       // tmp = D x
       tmp.sadd(-1.0, src.block(1));      // tmp = g - D x
 
-      // Step 3: Approximate Schur complement solve
-      //   y = C^{-1}(g - Dx) ≈ pressure_scaling * M_p^{-1}(g - Dx)
-      preconditioner_pressure.vmult(dst.block(1), tmp);
-      dst.block(1) *= pressure_scaling;
+      // Step 3: Cahouet-Chabard Schur complement solve
+      //   S^{-1} ≈ -(rho/dt)*K_p^{-1} - theta*nu*M_p^{-1}
+      //
+      // Term 1 (dominant): -(rho/dt) * K_p^{-1} * (g - Dx)
+      preconditioner_pressure_lapl.vmult(dst.block(1), tmp);
+      dst.block(1) *= -(rho_val / deltat_val);
+
+      // Term 2: -theta*nu * M_p^{-1} * (g - Dx)
+      preconditioner_pressure_mass.vmult(tmp2, tmp);
+      dst.block(1).add(-(theta_val * nu_val), tmp2);
     }
 
   protected:
@@ -340,12 +370,20 @@ public:
     TrilinosWrappers::PreconditionAMG     preconditioner_velocity;
 
     const TrilinosWrappers::SparseMatrix *pressure_mass;
-    TrilinosWrappers::PreconditionILU     preconditioner_pressure;
+    TrilinosWrappers::PreconditionILU     preconditioner_pressure_mass;
+
+    const TrilinosWrappers::SparseMatrix *pressure_stiffness;
+    TrilinosWrappers::PreconditionAMG     preconditioner_pressure_lapl;
 
     const TrilinosWrappers::SparseMatrix *B;
-    double pressure_scaling = 1.0;
+
+    double nu_val     = 0.001;
+    double rho_val    = 1.0;
+    double deltat_val = 0.02;
+    double theta_val  = 1.0;
 
     mutable TrilinosWrappers::MPI::Vector tmp;
+    mutable TrilinosWrappers::MPI::Vector tmp2;
     mutable bool tmp_initialized = false;
   };
 
@@ -569,6 +607,7 @@ protected:
 
   TrilinosWrappers::BlockSparseMatrix system_matrix;
   TrilinosWrappers::BlockSparseMatrix pressure_mass;
+  TrilinosWrappers::BlockSparseMatrix pressure_stiffness; // Pressure Laplacian K_p
 
   TrilinosWrappers::MPI::BlockVector system_rhs;
   TrilinosWrappers::MPI::BlockVector solution_owned;
@@ -587,6 +626,9 @@ protected:
 
   // Flag: pressure mass matrix only needs to be assembled once (mesh-dependent only)
   bool pressure_mass_assembled = false;
+
+  // Flag: pressure stiffness (Laplacian) only assembled once
+  bool pressure_stiffness_assembled = false;
 
   // Homogeneous Dirichlet constraints for Newton updates (built once in setup)
   AffineConstraints<double> newton_constraints;

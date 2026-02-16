@@ -270,6 +270,7 @@ void NavierStokes<dim>::setup()
 
     system_matrix.reinit(block_owned_dofs, bdsp, MPI_COMM_WORLD);
     pressure_mass.reinit(block_owned_dofs, bdsp, MPI_COMM_WORLD);
+    pressure_stiffness.reinit(block_owned_dofs, bdsp, MPI_COMM_WORLD);
   }
 
   pcout << "Setup complete." << std::endl;
@@ -283,6 +284,8 @@ void NavierStokes<dim>::assemble_newton_system()
   system_rhs    = 0;
   if (!pressure_mass_assembled)
     pressure_mass = 0;
+  if (!pressure_stiffness_assembled)
+    pressure_stiffness = 0;
 
   FEValues<dim> fe_values(*mapping,
                           *fe,
@@ -295,6 +298,7 @@ void NavierStokes<dim>::assemble_newton_system()
 
   FullMatrix<double> cell_matrix(dofs_per_cell, dofs_per_cell);
   FullMatrix<double> cell_pressure_mass(dofs_per_cell, dofs_per_cell); 
+  FullMatrix<double> cell_pressure_stiff(dofs_per_cell, dofs_per_cell);
   Vector<double>     cell_rhs(dofs_per_cell);
 
   std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
@@ -311,11 +315,16 @@ void NavierStokes<dim>::assemble_newton_system()
   std::vector<Tensor<1, dim>> old_velocity_values(n_q_points);
   std::vector<Tensor<2, dim>> old_velocity_gradients(n_q_points); // needed for CN (theta<1)
 
-  // Support vectors for phi_u, grad_phi_u, div_phi_u, phi_p
+  // Support vectors for phi_u, grad_phi_u, div_phi_u, phi_p, grad_phi_p
   std::vector<Tensor<1, dim>> phi_u(dofs_per_cell);
   std::vector<Tensor<2, dim>> grad_phi_u(dofs_per_cell);
   std::vector<double>         div_phi_u(dofs_per_cell);
   std::vector<double>         phi_p(dofs_per_cell);
+  std::vector<Tensor<1, dim>> grad_phi_p(dofs_per_cell); // for pressure Laplacian
+
+  // Forcing term evaluation vectors (were missing – needed for residual)
+  Vector<double> f_val_new(dim + 1);
+  Vector<double> f_val_old(dim + 1);
 
   for (const auto &cell : dof_handler.active_cell_iterators())
     {
@@ -324,6 +333,7 @@ void NavierStokes<dim>::assemble_newton_system()
           cell_matrix = 0;
           cell_rhs    = 0;
           cell_pressure_mass = 0;
+          cell_pressure_stiff = 0;
 
           fe_values.reinit(cell);
 
@@ -346,6 +356,20 @@ void NavierStokes<dim>::assemble_newton_system()
                   grad_phi_u[k] = fe_values[velocities].gradient(k, q);
                   div_phi_u[k]  = fe_values[velocities].divergence(k, q);
                   phi_p[k]      = fe_values[pressure].value(k, q);
+                  grad_phi_p[k] = fe_values[pressure].gradient(k, q);
+                }
+
+              // Evaluate forcing at t^{n+1} and t^n (for theta-method)
+              const auto &x_q = fe_values.quadrature_point(q);
+              forcing_term->set_time(time);
+              forcing_term->vector_value(x_q, f_val_new);
+              forcing_term->set_time(time - deltat);
+              forcing_term->vector_value(x_q, f_val_old);
+              Tensor<1, dim> f_new, f_old;
+              for (unsigned int d = 0; d < dim; ++d)
+                {
+                  f_new[d] = f_val_new[d];
+                  f_old[d] = f_val_old[d];
                 }
 
               for (unsigned int i = 0; i < dofs_per_cell; ++i)
@@ -371,6 +395,12 @@ void NavierStokes<dim>::assemble_newton_system()
 
                   cell_rhs(i) += (-time_term - conv_impl - visc_impl - conv_expl - visc_expl - pres_term - div_term) * JxW;
 
+                  // Forcing: +theta*f^{n+1} . phi + (1-theta)*f^n . phi
+                  // (This is part of -R: the forcing has a + sign in the
+                  //  momentum equation, so it enters the RHS = -R with + sign.)
+                  cell_rhs(i) += (theta * (f_new * phi_u[i]) +
+                                  (1.0 - theta) * (f_old * phi_u[i])) * JxW;
+
                   // Newton Jacobian with theta-method
                   for (unsigned int j = 0; j < dofs_per_cell; ++j)
                     {
@@ -393,6 +423,10 @@ void NavierStokes<dim>::assemble_newton_system()
                       // Pressure mass matrix for preconditioner
                       if (!pressure_mass_assembled)
                         cell_pressure_mass(i, j) += phi_p[i] * phi_p[j] * JxW;
+
+                      // Pressure stiffness (Laplacian) for Cahouet-Chabard preconditioner
+                      if (!pressure_stiffness_assembled)
+                        cell_pressure_stiff(i, j) += grad_phi_p[i] * grad_phi_p[j] * JxW;
                     }
                 }
             }
@@ -402,6 +436,8 @@ void NavierStokes<dim>::assemble_newton_system()
           newton_constraints.distribute_local_to_global(cell_matrix, cell_rhs, local_dof_indices, system_matrix, system_rhs);
           if (!pressure_mass_assembled)
             newton_constraints.distribute_local_to_global(cell_pressure_mass, local_dof_indices, pressure_mass);
+          if (!pressure_stiffness_assembled)
+            newton_constraints.distribute_local_to_global(cell_pressure_stiff, local_dof_indices, pressure_stiffness);
         }
     }
 
@@ -411,6 +447,11 @@ void NavierStokes<dim>::assemble_newton_system()
     {
       pressure_mass.compress(VectorOperation::add);
       pressure_mass_assembled = true;
+    }
+  if (!pressure_stiffness_assembled)
+    {
+      pressure_stiffness.compress(VectorOperation::add);
+      pressure_stiffness_assembled = true;
     }
 }
 
@@ -423,17 +464,15 @@ void NavierStokes<dim>::solve_newton_system()
   // Usiamo una tolleranza di 1e-2
   SolverControl solver_control(40000, 1e-2 * rhs_norm);
 
-  // Use block-triangular preconditioner with AMG on velocity block
-  // The pressure Schur complement for time-dependent NS is:
-  //   S = -(dt/rho) M_p  =>  S^{-1} ≈ -(rho/dt) M_p^{-1}
-  // So the pressure_scaling must be -rho/deltat.
-  const double pressure_scaling = -rho / deltat;
-
+  // Cahouet-Chabard preconditioner:
+  //   Velocity block: AMG (non-elliptic)
+  //   Pressure block: S^{-1} ≈ -(rho/dt)*K_p^{-1} - theta*nu*M_p^{-1}
   PreconditionBlockTriangular preconditioner;
   preconditioner.initialize(system_matrix.block(0, 0),
                             pressure_mass.block(1, 1),
+                            pressure_stiffness.block(1, 1),
                             system_matrix.block(1, 0),
-                            pressure_scaling);
+                            nu, rho, deltat, theta);
 
   // GMRES con restart=150 per sistemi saddle-point
   typename SolverGMRES<TrilinosWrappers::MPI::BlockVector>::AdditionalData
@@ -456,6 +495,8 @@ void NavierStokes<dim>::assemble_linearized_system()
   system_rhs     = 0;
   if (!pressure_mass_assembled)
     pressure_mass  = 0;
+  if (!pressure_stiffness_assembled)
+    pressure_stiffness = 0;
 
   FEValues<dim> fe_values(*mapping,
                           *fe,
@@ -468,6 +509,7 @@ void NavierStokes<dim>::assemble_linearized_system()
 
   FullMatrix<double> cell_matrix(dofs_per_cell, dofs_per_cell);
   FullMatrix<double> cell_pressure_mass(dofs_per_cell, dofs_per_cell);
+  FullMatrix<double> cell_pressure_stiff(dofs_per_cell, dofs_per_cell);
   Vector<double>     cell_rhs(dofs_per_cell);
 
   std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
@@ -485,6 +527,7 @@ void NavierStokes<dim>::assemble_linearized_system()
   std::vector<Tensor<2, dim>> grad_phi_u(dofs_per_cell);
   std::vector<double>         div_phi_u(dofs_per_cell);
   std::vector<double>         phi_p(dofs_per_cell);
+  std::vector<Tensor<1, dim>> grad_phi_p(dofs_per_cell); // for pressure Laplacian
 
   // Forcing term evaluation vectors
   Vector<double> f_val_new(dim + 1);
@@ -524,6 +567,7 @@ void NavierStokes<dim>::assemble_linearized_system()
       cell_matrix        = 0;
       cell_rhs           = 0;
       cell_pressure_mass = 0;
+      cell_pressure_stiff = 0;
 
       fe_values.reinit(cell);
 
@@ -550,6 +594,7 @@ void NavierStokes<dim>::assemble_linearized_system()
               grad_phi_u[k] = fe_values[velocities].gradient(k, q);
               div_phi_u[k]  = fe_values[velocities].divergence(k, q);
               phi_p[k]      = fe_values[pressure].value(k, q);
+              grad_phi_p[k] = fe_values[pressure].gradient(k, q);
             }
 
           // Evaluate forcing term at t^{n+1} and t^n
@@ -610,6 +655,10 @@ void NavierStokes<dim>::assemble_linearized_system()
                   // Pressure mass for preconditioner
                   if (!pressure_mass_assembled)
                     cell_pressure_mass(i, j) += phi_p[i] * phi_p[j] * JxW;
+
+                  // Pressure stiffness (Laplacian) for Cahouet-Chabard
+                  if (!pressure_stiffness_assembled)
+                    cell_pressure_stiff(i, j) += grad_phi_p[i] * grad_phi_p[j] * JxW;
                 }
             }
         }
@@ -625,6 +674,10 @@ void NavierStokes<dim>::assemble_linearized_system()
         system_constraints.distribute_local_to_global(cell_pressure_mass,
                                                        local_dof_indices,
                                                        pressure_mass);
+      if (!pressure_stiffness_assembled)
+        system_constraints.distribute_local_to_global(cell_pressure_stiff,
+                                                       local_dof_indices,
+                                                       pressure_stiffness);
     }
 
   system_matrix.compress(VectorOperation::add);
@@ -633,6 +686,11 @@ void NavierStokes<dim>::assemble_linearized_system()
     {
       pressure_mass.compress(VectorOperation::add);
       pressure_mass_assembled = true;
+    }
+  if (!pressure_stiffness_assembled)
+    {
+      pressure_stiffness.compress(VectorOperation::add);
+      pressure_stiffness_assembled = true;
     }
 }
 
@@ -643,13 +701,12 @@ bool NavierStokes<dim>::solve_linear_system()
   // Use 1e-4 relative tolerance
   SolverControl solver_control(40000, std::max(1e-4 * rhs_norm, 1e-12));
 
-  const double pressure_scaling = -rho / deltat;
-
   PreconditionBlockTriangular preconditioner;
   preconditioner.initialize(system_matrix.block(0, 0),
                             pressure_mass.block(1, 1),
+                            pressure_stiffness.block(1, 1),
                             system_matrix.block(1, 0),
-                            pressure_scaling);
+                            nu, rho, deltat, theta);
 
   typename SolverGMRES<TrilinosWrappers::MPI::BlockVector>::AdditionalData
     gmres_data(150);
@@ -802,7 +859,9 @@ void NavierStokes<dim>::compute_lift_drag(double &drag_coeff, double &lift_coeff
   force_x = Utilities::MPI::sum(force_x, MPI_COMM_WORLD);
   force_y = Utilities::MPI::sum(force_y, MPI_COMM_WORLD);
 
-  // Cd = 2 * Fd / (rho * U_mean^2 * D * H) (3D) or *L (2D, L=1)
+  // Cd = 2 * Fd / (rho * U_mean^2 * D * L)
+  // where L = 1 (2D) or H (3D)
+  // The factor 2 is required by the standard Schaefer-Turek benchmark.
   
   double U_mean = 0.0;
   if (dim == 2) U_mean = (2.0/3.0) * U_m;
@@ -812,9 +871,8 @@ void NavierStokes<dim>::compute_lift_drag(double &drag_coeff, double &lift_coeff
   double ref_area = D;
   if (dim == 3) ref_area = D * H;
 
-  // Project formula: Cd = Fd / (U^2 * L), Cl = Fl / (U^2 * L)
-  // where U = U_mean (reference velocity), L = ref_area
-  const double den = rho * U_mean * U_mean * ref_area;
+  // Schaefer-Turek: C_D = 2*F_D/(rho*U_mean^2*ref_area)
+  const double den = 0.5 * rho * U_mean * U_mean * ref_area;
   
   drag_coeff = force_x / den;
   lift_coeff = force_y / den;
@@ -919,6 +977,19 @@ void NavierStokes<dim>::run()
     {
       time += deltat;
       time_step++;
+
+      // For the very first step with Crank-Nicolson, override to
+      // Backward Euler (theta=1).  CN at the first step amplifies the
+      // discontinuity between the zero IC and the inlet BC, creating
+      // 2nd-order oscillations in velocity and pressure that often
+      // prevent GMRES convergence.  BE damps them out.  After this
+      // single step we restore the user's theta.
+      const double theta_save = theta;
+      if (first_step && time_scheme == TimeScheme::CrankNicolson)
+        {
+          theta = 1.0;
+          pcout << " (using BE for first step)";
+        }
 
       pcout << "Time step " << time_step << " at t=" << time << std::flush;
 
@@ -1062,6 +1133,9 @@ void NavierStokes<dim>::run()
       solution_old_old = solution_old;
       solution_old     = current_solution;
       first_step       = false;
+
+      // Restore original theta after first step override
+      theta = theta_save;
 
       // Benchmark quantities
       double drag = 0.0, lift = 0.0;

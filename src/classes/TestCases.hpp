@@ -41,11 +41,13 @@ class BenchmarkInletVelocity : public Function<dim>
 public:
   BenchmarkInletVelocity(const double H_,
                          const double U_m_,
-                         const bool   time_dep)
+                         const bool   time_dep,
+                         const double T_ramp_ = 0.0)
     : Function<dim>(dim + 1)
     , H(H_)
     , U_m(U_m_)
     , time_dependent(time_dep)
+    , T_ramp(T_ramp_)
   {}
 
   virtual double
@@ -81,6 +83,18 @@ public:
             profile *= std::sin(M_PI * t / 8.0);
           }
 
+        // Smooth temporal ramp for impulsive-start cases (e.g. 2D-2).
+        // Uses a half-cosine ramp: 0.5*(1 - cos(pi*t/T_ramp)) for t < T_ramp.
+        // This avoids the discontinuity u(0)=0 -> u(dt)=U_m that makes
+        // the first Newton/GMRES iterations diverge.
+        if (T_ramp > 0.0)
+          {
+            const double t = this->get_time();
+            if (t < T_ramp)
+              profile *= 0.5 * (1.0 - std::cos(M_PI * t / T_ramp));
+            // else: ramp = 1.0 (full velocity)
+          }
+
         return profile;
       }
 
@@ -98,6 +112,7 @@ protected:
   const double H;
   const double U_m;
   const bool   time_dependent;
+  const double T_ramp; // Ramp-up duration [s]; 0 = no ramp
 };
 
 
@@ -171,8 +186,12 @@ make_2D_2(const std::string  &mesh_file,
   tc.deltat            = deltat;
   tc.time_scheme       = ts;
   tc.nonlinear_method  = nm;
+  // Smooth ramp over 2 seconds to avoid impulsive start.
+  // At Re=100 with constant inlet, jumping from 0 to 1.5 m/s in one dt
+  // produces (u_new - 0)/dt -> infinity, killing Newton/GMRES.
   tc.inlet_velocity    =
-    std::make_shared<BenchmarkInletVelocity<2>>(H, U_m, /*time_dep=*/false);
+    std::make_shared<BenchmarkInletVelocity<2>>(H, U_m, /*time_dep=*/false,
+                                                /*T_ramp=*/2.0);
   tc.dirichlet_bc      = std::make_shared<ZeroDirichletBC<2>>();
   tc.forcing_term      = std::make_shared<ForcingTerm<2>>();
   tc.initial_condition = std::make_shared<InitialCondition<2>>();
@@ -281,8 +300,10 @@ make_3D_2Z(const std::string  &mesh_file,
   tc.deltat            = deltat;
   tc.time_scheme       = ts;
   tc.nonlinear_method  = nm;
+  // Smooth ramp over 2 seconds (same rationale as 2D-2)
   tc.inlet_velocity    =
-    std::make_shared<BenchmarkInletVelocity<3>>(H, U_m, /*time_dep=*/false);
+    std::make_shared<BenchmarkInletVelocity<3>>(H, U_m, /*time_dep=*/false,
+                                                /*T_ramp=*/2.0);
   tc.dirichlet_bc      = std::make_shared<ZeroDirichletBC<3>>();
   tc.forcing_term      = std::make_shared<ForcingTerm<3>>();
   tc.initial_condition = std::make_shared<InitialCondition<3>>();
