@@ -160,7 +160,7 @@ void NavierStokes<dim>::setup()
           {
             if (!cell->is_locally_owned())
               continue;
-            for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
+            for (unsigned int f = 0; f < cell->n_faces(); ++f)
               {
                 if (!cell->face(f)->at_boundary())
                   continue;
@@ -179,6 +179,23 @@ void NavierStokes<dim>::setup()
                     else if (std::abs(x) < tol)
                       cell->face(f)->set_boundary_id(inlet_boundary_id);
                     else if (std::abs(x - L) < tol)
+                      cell->face(f)->set_boundary_id(outlet_boundary_id);
+                    else
+                      cell->face(f)->set_boundary_id(wall_boundary_id);
+                  }
+                else if constexpr (dim == 3)
+                  {
+                    const double x = center[0];
+                    const double y = center[1];
+                    const double z = center[2];
+                    const double dist_cyl = std::sqrt((x - cx) * (x - cx) +
+                                                       (y - cy) * (y - cy));
+
+                    if (dist_cyl < r_cyl + 0.02)
+                      cell->face(f)->set_boundary_id(cylinder_boundary_id);
+                    else if (std::abs(z) < tol)
+                      cell->face(f)->set_boundary_id(inlet_boundary_id);
+                    else if (std::abs(z - L) < tol)
                       cell->face(f)->set_boundary_id(outlet_boundary_id);
                     else
                       cell->face(f)->set_boundary_id(wall_boundary_id);
