@@ -802,7 +802,8 @@ double NavierStokes<dim>::compute_pressure_difference()
     return evaluate_pressure(p_front) - evaluate_pressure(p_end);
 }
 
-
+// TODO we have to check if the direction of the flux in 3D is really in the z direction
+// TODO in this case is set different from the paper (where it is along the x direction)
 template <unsigned int dim>
 void NavierStokes<dim>::compute_lift_drag(double &drag_coeff, double &lift_coeff) const
 {
@@ -812,6 +813,7 @@ void NavierStokes<dim>::compute_lift_drag(double &drag_coeff, double &lift_coeff
 
   double force_x = 0.0;
   double force_y = 0.0;
+  double force_z = 0.0; // only for 3D
 
   const QGaussSimplex<dim - 1> face_quadrature_formula(degree_velocity + 1);
 
@@ -867,6 +869,8 @@ void NavierStokes<dim>::compute_lift_drag(double &drag_coeff, double &lift_coeff
 
                       force_x += force_loc[0] * JxW;
                       force_y += force_loc[1] * JxW; // Lift direction
+                      if constexpr (dim == 3)
+                        force_z += force_loc[2] * JxW;
                     }
                 }
             }
@@ -875,6 +879,8 @@ void NavierStokes<dim>::compute_lift_drag(double &drag_coeff, double &lift_coeff
 
   force_x = Utilities::MPI::sum(force_x, MPI_COMM_WORLD);
   force_y = Utilities::MPI::sum(force_y, MPI_COMM_WORLD);
+  if constexpr (dim == 3)
+    force_z = Utilities::MPI::sum(force_z, MPI_COMM_WORLD);
 
   // Cd = 2 * Fd / (rho * U_mean^2 * D * L)
   // where L = 1 (2D) or H (3D)
@@ -891,8 +897,16 @@ void NavierStokes<dim>::compute_lift_drag(double &drag_coeff, double &lift_coeff
   // Schaefer-Turek: C_D = 2*F_D/(rho*U_mean^2*ref_area)
   const double den = 0.5 * rho * U_mean * U_mean * ref_area;
   
-  drag_coeff = force_x / den;
-  lift_coeff = force_y / den;
+  if constexpr (dim == 2)
+    {
+      drag_coeff = force_x / den;
+      lift_coeff = force_y / den;
+    }
+  else if constexpr (dim == 3)
+    {
+      drag_coeff = force_z / den;
+      lift_coeff = force_y / den;
+    }
 }
 
 template <unsigned int dim>
