@@ -254,7 +254,7 @@ public:
       amg_data.n_cycles              = 1;
       amg_data.smoother_sweeps       = 3;
       amg_data.aggregation_threshold = 0.02;
-      preconditioner_velocity.initialize(velocity_stiffness_, amg_data);
+        preconditioner_velocity.initialize(velocity_stiffness_, amg_data);
       preconditioner_pressure.initialize(pressure_mass_);
     }
 
@@ -313,13 +313,10 @@ public:
       deltat_val         = deltat_;
       theta_val          = theta_;
 
-      // AMG for velocity block (convection-diffusion: non-elliptic)
-      TrilinosWrappers::PreconditionAMG::AdditionalData amg_data_vel;
-      amg_data_vel.elliptic              = false;
-      amg_data_vel.n_cycles              = 1;
-      amg_data_vel.smoother_sweeps       = 3;
-      amg_data_vel.aggregation_threshold = 0.02;
-      preconditioner_velocity.initialize(velocity_stiffness_, amg_data_vel);
+      // ILU for velocity block (more robust for convection-dominated problems)
+      TrilinosWrappers::PreconditionILU::AdditionalData ilu_data_vel;
+      ilu_data_vel.ilu_fill = 1; // You can increase for more robustness
+      preconditioner_velocity.initialize(velocity_stiffness_, ilu_data_vel);
 
       // ILU for pressure mass M_p
       preconditioner_pressure_mass.initialize(pressure_mass_);
@@ -367,7 +364,7 @@ public:
 
   protected:
     const TrilinosWrappers::SparseMatrix *velocity_stiffness;
-    TrilinosWrappers::PreconditionAMG     preconditioner_velocity;
+    TrilinosWrappers::PreconditionILU     preconditioner_velocity;
 
     const TrilinosWrappers::SparseMatrix *pressure_mass;
     TrilinosWrappers::PreconditionILU     preconditioner_pressure_mass;

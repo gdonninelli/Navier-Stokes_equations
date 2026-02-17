@@ -465,7 +465,7 @@ void NavierStokes<dim>::solve_newton_system()
   SolverControl solver_control(40000, 1e-2 * rhs_norm);
 
   // Cahouet-Chabard preconditioner:
-  //   Velocity block: AMG (non-elliptic)
+  //   Velocity block: ILU (robust for convection-dominated)
   //   Pressure block: S^{-1} ≈ -(rho/dt)*K_p^{-1} - theta*nu*M_p^{-1}
   PreconditionBlockTriangular preconditioner;
   preconditioner.initialize(system_matrix.block(0, 0),
