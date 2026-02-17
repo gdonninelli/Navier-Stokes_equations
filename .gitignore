@@ -37,3 +37,5 @@
 /build
 
 job.pbs
+
+mesh-3D*.msh

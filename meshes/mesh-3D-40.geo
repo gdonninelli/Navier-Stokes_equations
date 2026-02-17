@@ -1,5 +1,8 @@
 SetFactory("OpenCASCADE");
 
+// FORZA IL FORMATO COMPATIBILE CON DEAL.II
+Mesh.MshFileVersion = 2.2; 
+
 // --- Parameters ---
 L = 2.5;       // Length (z)
 H = 0.41;      // Height (y)
@@ -19,19 +22,16 @@ Box(1) = {0, 0, 0, W, H, L};
 Cylinder(2) = {-0.1, Cyl_y, Cyl_z, W + 0.2, 0, 0, D/2};
 BooleanDifference(3) = { Volume{1}; Delete; } { Volume{2}; Delete; };
 
-// --- Mesh Refinement ---
-Field[1] = Distance;
-Field[1].CurvesList = {7, 8}; // IDs of the circle curves
-Field[1].Sampling = 100;
+// --- Mesh Refinement (Box locale invece di Distance/Threshold) ---
+Field[1] = Box;
+Field[1].VIn = lc_cyl;
+Field[1].VOut = lc_global;
+// Il box racchiude il cilindro e si estende lungo z per coprire la scia
+Field[1].XMin = 0.0; Field[1].XMax = W;
+Field[1].YMin = 0.1; Field[1].YMax = 0.3;
+Field[1].ZMin = Cyl_z - 0.1; Field[1].ZMax = Cyl_z + 0.6; 
 
-Field[2] = Threshold;
-Field[2].IField = 1;
-Field[2].LcMin = lc_cyl;
-Field[2].LcMax = lc_global;
-Field[2].DistMin = 0.05; 
-Field[2].DistMax = 0.5;  
-
-Background Field = 2;
+Background Field = 1;
 
 // --- Physical Groups ---
 eps = 1e-3; 
