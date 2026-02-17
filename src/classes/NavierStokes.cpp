@@ -764,8 +764,8 @@ double NavierStokes<dim>::compute_pressure_difference()
         p_front = Point<dim>(0.15, 0.2);
         p_end   = Point<dim>(0.25, 0.2);
     } else {
-        p_front = Point<dim>(0.45, 0.2, 0.205);
-        p_end   = Point<dim>(0.55, 0.2, 0.205);
+        p_front = Point<dim>(0.205, 0.2, 0.40);
+        p_end   = Point<dim>(0.205, 0.2, 0.50);
     }
 
     // Helper lambda: evaluate pressure at a point robustly across MPI ranks
