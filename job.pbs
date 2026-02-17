@@ -1,0 +1,12 @@
+#!/bin/bash
+#PBS -N NavierStokes
+#PBS -l select=1:ncpus=4:mpiprocs=4
+#PBS -l walltime=04:00:00
+#PBS -o job_output.log
+#PBS -e job_error.log
+
+# Entra nella directory del progetto
+cd ${PBS_O_WORKDIR}/build
+
+# Lancia la simulazione con 4 processi MPI
+mpirun -np 4 ./navier_stokes > live_output.log 2> live_error.log
