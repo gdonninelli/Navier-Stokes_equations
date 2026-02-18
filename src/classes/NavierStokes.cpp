@@ -994,7 +994,7 @@ void NavierStokes<dim>::run()
   solution_old_old = solution;
   current_solution = solution;
   first_step       = true;
-  second_step      = false;
+  second_step      = true;
 
   time             = 0.0;
   unsigned int time_step = 0;
@@ -1146,25 +1146,92 @@ void NavierStokes<dim>::run()
           pcout << std::endl;
         }
       // Linearized Approach
-      else 
+      else
         {
-          assemble_linearized_system();
-          bool gmres_converged = solve_linear_system();
-          if (!gmres_converged)
+          // Adaptive time-stepping con checkpointing
+          constexpr int    max_substeps   = 4;    // max dimezzamenti dt consentiti
+
+          // Salva lo stato prima di tentare il passo
+          TrilinosWrappers::MPI::BlockVector solution_checkpoint = solution_old;
+          TrilinosWrappers::MPI::BlockVector solution_old_old_checkpoint = solution_old_old;
+          const bool first_step_checkpoint = first_step;
+
+          double dt_attempt   = deltat;
+          bool   step_ok      = false;
+          int    substep      = 0;
+
+          while (!step_ok && substep <= max_substeps)
           {
-            // Fallback: ri-assembla con theta=1 (Backward Euler) e u_star = u^n
-            pcout << "  Fallback to BE + 1st-order extrapolation..." << std::endl;
-            const double theta_save_inner = theta;
-            theta = 1.0;
-            const bool first_step_save = first_step;
-            first_step = true;
+            if (substep > 0)
+            {
+              // Dimezza dt e ripristina lo stato al checkpoint
+              dt_attempt  *= 0.5;
+              solution_old     = solution_checkpoint;
+              solution_old_old = solution_old_old_checkpoint;
+              first_step       = first_step_checkpoint;
+              pcout << "  Retrying with dt=" << dt_attempt
+                    << " (attempt " << substep + 1 << ")" << std::endl;
+            }
+
+            // Sostituisce temporaneamente deltat per l'assembly
+            const double deltat_save = deltat;
+            deltat = dt_attempt;
+
+            // Tenta con CN + u_star di ordine 2
             assemble_linearized_system();
-            gmres_converged = solve_linear_system();
-            theta      = theta_save_inner;
-            first_step = first_step_save;
-            if (!gmres_converged)
-              pcout << "  WARNING: Fallback BE also failed. Solution may be corrupted." << std::endl;
+            bool gmres_ok = solve_linear_system();
+
+            if (!gmres_ok && substep == 0)
+            {
+              // Primo fallback: stessa dt ma BE + u_star primo ordine
+              pcout << "  Fallback to BE + 1st-order..." << std::endl;
+              const double theta_save_inner = theta;
+              const bool   fs_save          = first_step;
+              theta      = 1.0;
+              first_step = true;   // forza u_star = u^n
+              assemble_linearized_system();
+              gmres_ok   = solve_linear_system();
+              theta      = theta_save_inner;
+              first_step = fs_save;
+            }
+
+            deltat = deltat_save;
+
+            if (gmres_ok)
+            {
+              step_ok = true;
+              if (substep > 0)
+              {
+                pcout << "  Step accepted with reduced dt=" << dt_attempt << std::endl;
+              }
+            }
+            else
+            {
+              substep++;
+            }
           }
+
+          if (!step_ok)
+          {
+            // Ultimo tentativo disperato: ripristina checkpoint e usa BE puro
+            pcout << "  CRITICAL: all attempts failed. "
+                  << "Restoring checkpoint and forcing BE dt=" << dt_attempt << std::endl;
+            solution_old     = solution_checkpoint;
+            solution_old_old = solution_old_old_checkpoint;
+            first_step       = first_step_checkpoint;
+            const double theta_save_inner = theta;
+            const bool   fs_save          = first_step;
+            const double deltat_save      = deltat;
+            theta      = 1.0;
+            first_step = true;
+            deltat     = dt_attempt;
+            assemble_linearized_system();
+            solve_linear_system(); // accettiamo comunque il risultato
+            theta      = theta_save_inner;
+            first_step = fs_save;
+            deltat     = deltat_save;
+          }
+
           current_solution = solution_owned;
         }
 

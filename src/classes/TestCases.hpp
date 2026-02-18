@@ -317,6 +317,12 @@ make_3D_2Z(const std::string  &mesh_file,
 // IC:  U = V = W = P = 0.
 // Compute: C_D(t), C_L(t), ΔP(t) for 0 ≤ t ≤ 8,
 //          max C_D, max C_L, ΔP(t=8)
+//
+// Note: no artificial ramp needed — sin(πt/8) already starts from 0 and
+// grows smoothly. The peak Re≈100 is reached at t=4s, giving the solver
+// ample time to adapt. dt=0.01 (half the default) is used because the
+// 2nd-order extrapolation of u_star can overshoot during the steepest
+// growth phase (t≈1–3s) on a 3D mesh at high Re.
 inline BenchmarkTestCase<3>
 make_3D_3Z(const std::string  &mesh_file,
            TimeScheme          ts     = TimeScheme::CrankNicolson,
@@ -338,9 +344,15 @@ make_3D_3Z(const std::string  &mesh_file,
   tc.Re                = Re;
   tc.U_m               = U_m;
   tc.T                 = T;
-  tc.deltat            = deltat;
+  // Use dt=0.01 by default (half of the Re=100 automatic value).
+  // The sin(πt/8) inlet is smooth so no ramp is needed, but the steeper
+  // growth phase around t=1–3s still stresses the 2nd-order extrapolation
+  // on a 3D mesh. Halving dt keeps u_star overshoot within safe bounds.
+  tc.deltat            = (deltat > 0) ? deltat : 0.01;
   tc.time_scheme       = ts;
   tc.nonlinear_method  = nm;
+  // No T_ramp: sin(πt/8) is zero at t=0 by construction, so the
+  // impulsive-start discontinuity that affects 3D-2Z does not apply here.
   tc.inlet_velocity    =
     std::make_shared<BenchmarkInletVelocity<3>>(H, U_m, /*time_dep=*/true);
   tc.dirichlet_bc      = std::make_shared<ZeroDirichletBC<3>>();
