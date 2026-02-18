@@ -26,7 +26,7 @@ int main(int argc, char *argv[])
     //   deltat:          positive value or <= 0 for automatic
 
     // const std::string mesh_2d = "../meshes/mesh-2D-200.msh";
-    const std::string mesh_3d = "../meshes/mesh-3D-5.msh";
+    const std::string mesh_3d = "../meshes/mesh-3D-40.msh";
 
     // auto tc = TestCases::make_2D_1(mesh_2d);
     // auto tc = TestCases::make_2D_2(mesh_2d);
