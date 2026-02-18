@@ -479,7 +479,7 @@ void NavierStokes<dim>::solve_newton_system()
   const double rhs_norm = system_rhs.l2_norm();
 
   // Usiamo una tolleranza di 1e-2
-  SolverControl solver_control(40000, 1e-2 * rhs_norm);
+  SolverControl solver_control(200, 1e-2 * rhs_norm);
 
   // Cahouet-Chabard preconditioner:
   //   Velocity block: ILU (robust for convection-dominated)
@@ -598,11 +598,16 @@ void NavierStokes<dim>::assemble_linearized_system()
 
           // Extrapolated transport velocity
           Tensor<1, dim> u_star;
-          if (first_step || time_scheme == TimeScheme::BackwardEuler)
+          if (first_step || second_step || time_scheme == TimeScheme::BackwardEuler)
             u_star = old_velocity_values[q];          // 1st-order: u* = u^n
-          else
-            u_star = 2.0 * old_velocity_values[q]
-                     - old_old_velocity_values[q];    // 2nd-order: u* = 2u^n - u^{n-1}
+          else {
+            u_star = 2.0 * old_velocity_values[q] - old_old_velocity_values[q];    // 2nd-order: u* = 2u^n - u^{n-1}
+            // Safety clamp: se u_star cresce più del 20% rispetto a u^n, ricada su u^n
+            const double norm_star = u_star.norm();
+            const double norm_old  = old_velocity_values[q].norm();
+            if (norm_old > 1e-12 && norm_star > 1.2 * norm_old)
+              u_star = old_velocity_values[q];
+          }
 
           // Precompute basis functions + divergence
           for (unsigned int k = 0; k < dofs_per_cell; ++k)
@@ -716,7 +721,7 @@ bool NavierStokes<dim>::solve_linear_system()
 {
   const double rhs_norm = system_rhs.l2_norm();
   // Use 1e-4 relative tolerance
-  SolverControl solver_control(40000, std::max(1e-4 * rhs_norm, 1e-12));
+  SolverControl solver_control(200, std::max(1e-4 * rhs_norm, 1e-12));
 
   PreconditionBlockTriangular preconditioner;
   preconditioner.initialize(system_matrix.block(0, 0),
@@ -989,6 +994,7 @@ void NavierStokes<dim>::run()
   solution_old_old = solution;
   current_solution = solution;
   first_step       = true;
+  second_step      = false;
 
   time             = 0.0;
   unsigned int time_step = 0;
@@ -1143,15 +1149,23 @@ void NavierStokes<dim>::run()
       else 
         {
           assemble_linearized_system();
-          const bool gmres_converged = solve_linear_system();
-          current_solution = solution_owned;
-
+          bool gmres_converged = solve_linear_system();
           if (!gmres_converged)
-            {
-              pcout << "  Continuing with best available approximation..." << std::endl;
-              // The simulation continues - the user can decide to abort manually
-              // or let it continue and observe the results
-            }
+          {
+            // Fallback: ri-assembla con theta=1 (Backward Euler) e u_star = u^n
+            pcout << "  Fallback to BE + 1st-order extrapolation..." << std::endl;
+            const double theta_save_inner = theta;
+            theta = 1.0;
+            const bool first_step_save = first_step;
+            first_step = true;
+            assemble_linearized_system();
+            gmres_converged = solve_linear_system();
+            theta      = theta_save_inner;
+            first_step = first_step_save;
+            if (!gmres_converged)
+              pcout << "  WARNING: Fallback BE also failed. Solution may be corrupted." << std::endl;
+          }
+          current_solution = solution_owned;
         }
 
       {
@@ -1163,6 +1177,7 @@ void NavierStokes<dim>::run()
       // Shift time levels
       solution_old_old = solution_old;
       solution_old     = current_solution;
+      second_step      = first_step;   // second_step = true solo durante il 2° step
       first_step       = false;
 
       // Restore original theta after first step override

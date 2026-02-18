@@ -620,6 +620,7 @@ protected:
   // For CN: u^{n-1} (needed for 2nd-order extrapolation of transport velocity)
   TrilinosWrappers::MPI::BlockVector solution_old_old;
   bool first_step = true;
+  bool second_step = false; // true solo durante il secondo step
 
   // Flag: pressure mass matrix only needs to be assembled once (mesh-dependent only)
   bool pressure_mass_assembled = false;

@@ -297,13 +297,13 @@ make_3D_2Z(const std::string  &mesh_file,
   tc.Re                = Re;
   tc.U_m               = U_m;
   tc.T                 = T;
-  tc.deltat            = deltat;
+  tc.deltat            = (deltat > 0) ? deltat : 0.01;
   tc.time_scheme       = ts;
   tc.nonlinear_method  = nm;
   // Smooth ramp over 2 seconds (same rationale as 2D-2)
   tc.inlet_velocity    =
     std::make_shared<BenchmarkInletVelocity<3>>(H, U_m, /*time_dep=*/false,
-                                                /*T_ramp=*/2.0);
+                                                /*T_ramp=*/4.0);
   tc.dirichlet_bc      = std::make_shared<ZeroDirichletBC<3>>();
   tc.forcing_term      = std::make_shared<ForcingTerm<3>>();
   tc.initial_condition = std::make_shared<InitialCondition<3>>();
