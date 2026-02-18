@@ -1070,37 +1070,7 @@ void NavierStokes<dim>::output(const unsigned int time_step) {
 
   data_out.build_patches(*mapping);
 
-  data_out.write_vtu_with_pvtu_record("./", "solution", time_step,
-                                      MPI_COMM_WORLD, 4);
-
-  // Add this time step to PVD records and write the collection file
-  // The PVTU filename format is solution_XXXXX.pvtu (5-digit zero-padded)
-  std::ostringstream pvtu_filename;
-  pvtu_filename << "solution_" << std::setfill('0') << std::setw(5) << time_step
-                << ".pvtu";
-
-  pvd_records.push_back({time, pvtu_filename.str()});
-  write_pvd_file();
-}
-
-template <unsigned int dim> void NavierStokes<dim>::write_pvd_file() const {
-  // Only rank 0 writes the PVD file
-  if (mpi_rank != 0)
-    return;
-
-  std::ofstream pvd_file("solution.pvd");
-  pvd_file << "<?xml version=\"1.0\"?>\n";
-  pvd_file << "<VTKFile type=\"Collection\" version=\"0.1\">\n";
-  pvd_file << "  <Collection>\n";
-
-  for (const auto &record : pvd_records) {
-    pvd_file << "    <DataSet timestep=\"" << record.first << "\" file=\""
-             << record.second << "\"/>\n";
-  }
-
-  pvd_file << "  </Collection>\n";
-  pvd_file << "</VTKFile>\n";
-  pvd_file.close();
+  data_out.write_vtu_with_pvtu_record("./", "solution", time_step, MPI_COMM_WORLD, 4);
 }
 
 template <unsigned int dim> void NavierStokes<dim>::run() {
