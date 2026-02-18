@@ -999,7 +999,8 @@ void NavierStokes<dim>::compute_lift_drag(double &drag_coeff,
             stress += rho * nu * (grad_u + transpose(grad_u));
 
             // Local force = stress * normal
-            Tensor<1, dim> force_loc = stress * normal;
+            // Negative sign because force on fluid is -force on cylinder
+            Tensor<1, dim> force_loc = -(stress * normal); 
 
             force_x += force_loc[0] * JxW;
             force_y += force_loc[1] * JxW; // Lift direction
@@ -1123,6 +1124,26 @@ template <unsigned int dim> void NavierStokes<dim>::run() {
     // Update BC and forcing to t^{n+1}
     inlet_velocity->set_time(time);
     forcing_term->set_time(time);
+
+    {
+      Point<dim> p_inlet;
+      if (dim == 2) p_inlet = Point<dim>(0, H/2.0);      
+      else          p_inlet = Point<dim>(0, H/2.0, H/2.0);
+        
+      double u_current_real = inlet_velocity->value(p_inlet, (dim==2 ? 0 : 2));
+
+      double u_case3_theoretical = U_m * std::sin(M_PI * time / 8.0);
+
+      if (std::abs(u_current_real - u_case3_theoretical) < 1e-4 && time > 0.0) {
+            
+        double u_mean_instant = (dim == 2) ? (2.0/3.0 * u_current_real) : (4.0/9.0 * u_current_real);
+        double re_instant = (u_mean_instant * D) / nu;
+
+        if (mpi_rank == 0) {
+              pcout << "   Instantaneous Re: " << re_instant << std::endl;
+          }
+        }
+    }
 
     auto wall_start = std::chrono::high_resolution_clock::now();
 
