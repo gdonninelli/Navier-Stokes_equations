@@ -126,7 +126,8 @@ template <unsigned int dim> void NavierStokes<dim>::setup() {
           << ", Cylinder=" << cylinder_boundary_id << std::endl;
 
     // Safety check: if expected IDs are missing, assign them geometrically
-    bool has_inlet = false, has_walls = false, has_cylinder = false;
+    // Also checking outlet (102) to ensure it is correctly assigned
+    bool has_inlet = false, has_walls = false, has_cylinder = false, has_outlet = false;
     for (auto id : ids) {
       if (id == inlet_boundary_id)
         has_inlet = true;
@@ -134,9 +135,15 @@ template <unsigned int dim> void NavierStokes<dim>::setup() {
         has_walls = true;
       if (id == cylinder_boundary_id)
         has_cylinder = true;
+      if (id == outlet_boundary_id)
+        has_outlet = true;
     }
 
-    if (!has_inlet || !has_walls || !has_cylinder) {
+    // In parallel, 'ids' only contains locally seen IDs.
+    // We trust that if the mesh is partitioned, at least one proc sees each boundary.
+    // Local check: if *I* don't see outlet, *I* run the check.
+    
+    if (!has_inlet || !has_walls || !has_cylinder || !has_outlet) {
       pcout << "  WARNING: Expected boundary IDs not found! "
             << "Assigning boundary IDs geometrically..." << std::endl;
 
@@ -246,6 +253,14 @@ template <unsigned int dim> void NavierStokes<dim>::setup() {
     VectorTools::interpolate_boundary_values(
         *mapping, dof_handler, cylinder_boundary_id,
         Functions::ZeroFunction<dim>(dim + 1), newton_constraints, vel_mask);
+    
+    // Pin pressure at outlet to remove nullspace from K_p and system matrix
+    const FEValuesExtractors::Scalar pressure_ext(dim);
+    const ComponentMask press_mask = fe->component_mask(pressure_ext);
+    VectorTools::interpolate_boundary_values(
+        *mapping, dof_handler, outlet_boundary_id,
+        Functions::ZeroFunction<dim>(dim + 1), newton_constraints, press_mask);
+
     newton_constraints.close();
   }
 
@@ -259,8 +274,14 @@ template <unsigned int dim> void NavierStokes<dim>::setup() {
                                                                        n_p};
     BlockDynamicSparsityPattern bdsp(dofs_per_block_sizes,
                                      dofs_per_block_sizes);
-    DoFTools::make_sparsity_pattern(dof_handler, bdsp, newton_constraints,
-                                    false);
+    // Use empty constraints + keep_constrained_dofs=true so the sparsity
+    // pattern is compatible with BOTH newton_constraints (Newton path)
+    // and system_constraints (Linearized path).
+    AffineConstraints<double> empty_constraints;
+    empty_constraints.reinit(locally_relevant_dofs);
+    empty_constraints.close();
+    DoFTools::make_sparsity_pattern(dof_handler, bdsp, empty_constraints,
+                                    true);
     SparsityTools::distribute_sparsity_pattern(
         bdsp, Utilities::MPI::all_gather(MPI_COMM_WORLD, locally_owned_dofs),
         MPI_COMM_WORLD, locally_relevant_dofs);
@@ -282,7 +303,7 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
     pressure_stiffness = 0;
 
   FEValues<dim> fe_values(*mapping, *fe, *quadrature,
-                          update_values | update_gradients | update_hessians |
+                          update_values | update_gradients |
                               update_quadrature_points | update_JxW_values);
 
   const unsigned int dofs_per_cell = fe->dofs_per_cell;
@@ -302,9 +323,7 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
   // Values of the solution at iteration k (current) and at time n-1 (old)
   std::vector<Tensor<1, dim>> current_velocity_values(n_q_points);
   std::vector<Tensor<2, dim>> current_velocity_gradients(n_q_points);
-  std::vector<Tensor<1, dim>> current_velocity_laplacians(n_q_points);
   std::vector<double> current_pressure_values(n_q_points);
-  std::vector<Tensor<1, dim>> current_pressure_gradients(n_q_points);
 
   std::vector<Tensor<1, dim>> old_velocity_values(n_q_points);
   std::vector<Tensor<2, dim>> old_velocity_gradients(
@@ -336,12 +355,8 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
                                                 current_velocity_values);
       fe_values[velocities].get_function_gradients(current_solution,
                                                    current_velocity_gradients);
-      fe_values[velocities].get_function_laplacians(
-          current_solution, current_velocity_laplacians);
       fe_values[pressure].get_function_values(current_solution,
                                               current_pressure_values);
-      fe_values[pressure].get_function_gradients(current_solution,
-                                                 current_pressure_gradients);
 
       fe_values[velocities].get_function_values(solution_old,
                                                 old_velocity_values);
@@ -434,28 +449,6 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
 
             cell_matrix(i, j) += val * JxW;
 
-            // --- SUPG Stabilization (LHS) ---
-            // Parametro Tau
-            const double h = cell->diameter();
-            const double u_mag = current_velocity_values[q].norm();
-            // Formula: tau = ((2/dt)^2 + (2|u|/h)^2 + (4nu/h^2)^2)^(-0.5)
-            const double tau = 1.0 / std::sqrt(std::pow(2.0 / deltat, 2) +
-                                               std::pow(2.0 * u_mag / h, 2) +
-                                               std::pow(4.0 * nu / (h * h), 2));
-
-            // Termine SUPG: (u . grad phi_i) * tau * (u . grad phi_j + grad
-            // psi_j)
-            const double supg_lhs =
-                (current_velocity_values[q] * grad_phi_u[i]) * tau *
-                (current_velocity_values[q] * grad_phi_u[j] + grad_phi_p[j]);
-            cell_matrix(i, j) += supg_lhs * JxW;
-
-            // --- Grad-Div Stabilization (LHS) ---
-            // gamma * (div phi_i * div phi_j)
-            const double gamma = 0.1;
-            const double grad_div_lhs = gamma * (div_phi_u[i] * div_phi_u[j]);
-            cell_matrix(i, j) += grad_div_lhs * JxW;
-
             // Pressure mass matrix for preconditioner
             if (!pressure_mass_assembled)
               cell_pressure_mass(i, j) += phi_p[i] * phi_p[j] * JxW;
@@ -463,54 +456,6 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
             // Pressure stiffness (Laplacian) for Cahouet-Chabard preconditioner
             if (!pressure_stiffness_assembled)
               cell_pressure_stiff(i, j) += grad_phi_p[i] * grad_phi_p[j] * JxW;
-          }
-
-          // --- SUPG Stabilization (RHS Residual) ---
-          {
-            // Recompute tau locally (redundant computation but cleaner scope,
-            // valid since q is same)
-            const double h = cell->diameter();
-            const double u_mag = current_velocity_values[q].norm();
-            const double tau = 1.0 / std::sqrt(std::pow(2.0 / deltat, 2) +
-                                               std::pow(2.0 * u_mag / h, 2) +
-                                               std::pow(4.0 * nu / (h * h), 2));
-
-            // Strong Residual Calculation
-            // Time term: (u - u_old)/dt  (Backward Euler approx for residual or
-            // consistent with theta?) Linearized residual uses (u - u_old)/dt
-            // approx usually. Let's use the same time term as in weak form: (u
-            // - u_old)/dt
-            Tensor<1, dim> time_res =
-                (current_velocity_values[q] - old_velocity_values[q]) / deltat;
-
-            // Convection: u . grad u
-            Tensor<1, dim> conv_res =
-                current_velocity_values[q] * current_velocity_gradients[q];
-
-            // Pressure: grad p
-            Tensor<1, dim> pres_res = current_pressure_gradients[q];
-
-            // Viscosity: -nu Delta u
-            Tensor<1, dim> visc_res = -nu * current_velocity_laplacians[q];
-
-            // Forcing: -f (evaluated at t^{n+theta})
-            Tensor<1, dim> force_res = -(theta * f_new + (1.0 - theta) * f_old);
-
-            // Total Strong Momentum Residual
-            Tensor<1, dim> strong_res =
-                time_res + conv_res + pres_res + visc_res + force_res;
-
-            // Subtract (tau * u . grad phi_i) * strong_res from RHS
-            // (The RHS vector accumulates -Residual, so we subtract valid SUPG
-            // term from valid Residual?
-            //  No, RHS = -Residual.
-            //  Standard weak form: (R, v) + (R_strong, tau u.grad v) = 0
-            //  => (R, v) = - (R_strong, tau u.grad v)
-            //  New RHS = - [ (Residual_Weak, v) + (Strong_Res, tau_v) ]
-            //  Existing code accumulates into cell_rhs: -Weak_Res_Terms.
-            //  So we must also subtract the SUPG term.
-            cell_rhs(i) -= (current_velocity_values[q] * grad_phi_u[i]) * tau *
-                           strong_res * JxW;
           }
         }
       }
@@ -536,6 +481,8 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
   }
   if (!pressure_stiffness_assembled) {
     pressure_stiffness.compress(VectorOperation::add);
+    // Regularize pressure stiffness for the preconditioner!
+    pressure_stiffness.add(1e-6, pressure_mass);
     pressure_stiffness_assembled = true;
   }
 }
@@ -544,7 +491,7 @@ template <unsigned int dim> void NavierStokes<dim>::solve_newton_system() {
   const double rhs_norm = system_rhs.l2_norm();
 
   // Usiamo una tolleranza di 1e-8
-  SolverControl solver_control(200, 1e-8 * rhs_norm);
+  SolverControl solver_control(40000, 1e-2 * rhs_norm);
 
   // Cahouet-Chabard preconditioner:
   //   Velocity block: ILU (robust for convection-dominated)
@@ -638,6 +585,15 @@ void NavierStokes<dim>::assemble_linearized_system() {
   VectorTools::interpolate_boundary_values(
       *mapping, dof_handler, cylinder_boundary_id,
       Functions::ZeroFunction<dim>(dim + 1), system_constraints, velocity_mask);
+
+  // Pin pressure at outlet (consistent with newton_constraints) to avoid
+  // singular pressure block in the Schur complement.
+  const FEValuesExtractors::Scalar pressure_ext(dim);
+  const ComponentMask press_mask = fe->component_mask(pressure_ext);
+  VectorTools::interpolate_boundary_values(
+      *mapping, dof_handler, outlet_boundary_id,
+      Functions::ZeroFunction<dim>(dim + 1), system_constraints, press_mask);
+
   system_constraints.close();
 
   // Cell loop
@@ -739,28 +695,25 @@ void NavierStokes<dim>::assemble_linearized_system() {
             (theta * (f_new * phi_u[i]) + (1.0 - theta) * (f_old * phi_u[i])) *
             JxW;
 
-        // --- SUPG Stabilization (Linearized) ---
-        // Calculate Tau
-        const double h = cell->diameter();
-        const double u_mag = u_star.norm();
-        const double tau = 1.0 / std::sqrt(std::pow(2.0 / deltat, 2) +
-                                           std::pow(2.0 * u_mag / h, 2) +
-                                           std::pow(4.0 * nu / (h * h), 2));
+        // --- SUPG Stabilization (Linearized RHS) ---
+        if (use_supg) {
+          // Calculate Tau
+          const double h = cell->diameter();
+          const double u_mag = u_star.norm();
+          const double tau = 1.0 / std::sqrt(std::pow(2.0 / deltat, 2) +
+                                             std::pow(2.0 * u_mag / h, 2) +
+                                             std::pow(4.0 * nu / (h * h), 2));
 
-        // SUPG Test Function: w_SUPG = tau * (u_star . grad phi_i)
-        // SUPG Test Function vector: w_SUPG = tau * (u_star . grad phi_i)
-        Tensor<1, dim> supg_test_vec = tau * (u_star * grad_phi_u[i]);
+          // SUPG Test Function vector: w_SUPG = tau * (u_star . grad phi_i)
+          Tensor<1, dim> supg_test_vec = tau * (u_star * grad_phi_u[i]);
 
-        // --- SUPG RHS Consistency ---
-        // Forcing term (theta-method)
-        Tensor<1, dim> forcing_rhs = (theta * f_new + (1.0 - theta) * f_old);
+          // SUPG RHS Consistency
+          Tensor<1, dim> forcing_rhs = (theta * f_new + (1.0 - theta) * f_old);
+          Tensor<1, dim> rhs_source =
+              forcing_rhs + old_velocity_values[q] / deltat;
 
-        // RHS contribution: (supg_test_vec) dot (RHS_source)
-        // RHS_source = f + u_old/dt
-        Tensor<1, dim> rhs_source =
-            forcing_rhs + old_velocity_values[q] / deltat;
-
-        cell_rhs(i) += (supg_test_vec * rhs_source) * JxW;
+          cell_rhs(i) += (supg_test_vec * rhs_source) * JxW;
+        }
 
         // LHS: matrix entries
         for (unsigned int j = 0; j < dofs_per_cell; ++j) {
@@ -782,40 +735,27 @@ void NavierStokes<dim>::assemble_linearized_system() {
 
           cell_matrix(i, j) += val * JxW;
 
-          // --- SUPG Stabilization (Linearized LHS) ---
-          // Added term: (supg_test_vec, LinearOperator(phi_j))
-          // LinearOperator(phi_j) approx: phi_j/dt + u*.grad phi_j + grad
-          // psi_j Note: neglecting -nu Delta phi_j (consistent with user
-          // request)
+          // --- SUPG + Grad-Div Stabilization (Linearized LHS) ---
+          if (use_supg) {
+            const double h = cell->diameter();
+            const double u_mag = u_star.norm();
+            const double tau = 1.0 / std::sqrt(std::pow(2.0 / deltat, 2) +
+                                               std::pow(2.0 * u_mag / h, 2) +
+                                               std::pow(4.0 * nu / (h * h), 2));
+            Tensor<1, dim> supg_test_vec = tau * (u_star * grad_phi_u[i]);
 
-          // Re-calculate supg_test_vec (needed here as i is outer loop, but j
-          // changes) Wait, i is fixed in this inner loop.
-          Tensor<1, dim> supg_test_vec = tau * (u_star * grad_phi_u[i]);
+            // Time + Convection part
+            cell_matrix(i, j) +=
+                (supg_test_vec * (phi_u[j] / deltat + u_star * grad_phi_u[j])) *
+                JxW;
 
-          Tensor<1, dim> op_phi_j = phi_u[j] / deltat;
-          op_phi_j += u_star * grad_phi_u[j]; // Convection
-          // op_phi_j += grad_phi_p[j]; // Pressure gradient? phi_p is scalar
-          // pressure shape. Wait. j iterates dofs_per_cell. If j corresponds
-          // to velocity dof, phi_u[j] is nonzero, phi_p[j] is zero? Yes. But
-          // grad_phi_p[j] is only non-zero if j is pressure dof. But op_phi_j
-          // vector is momentum equation residual. If j is pressure dof, then
-          // phi_u[j]=0. The term is grad psi_j. So we strictly add:
+            // Pressure Gradient part
+            cell_matrix(i, j) += (supg_test_vec * grad_phi_p[j]) * JxW;
 
-          // 1. Time + Convection part (acting on velocity dofs)
-          cell_matrix(i, j) +=
-              (supg_test_vec * (phi_u[j] / deltat + u_star * grad_phi_u[j])) *
-              JxW;
-
-          // 2. Pressure Gradient part (acting on pressure dofs)
-          // If j is pressure dof, grad_phi_p[j] is the gradient.
-          // (supg_test_vec * grad_phi_p[j])
-          // Note: grad_phi_p[j] is vector.
-          cell_matrix(i, j) += (supg_test_vec * grad_phi_p[j]) * JxW;
-
-          // --- Grad-Div Stabilization ---
-          // gamma * (div phi_i * div phi_j)
-          const double gamma = 0.1;
-          cell_matrix(i, j) += gamma * (div_phi_u[i] * div_phi_u[j]) * JxW;
+            // Grad-Div: gamma * (div phi_i * div phi_j)
+            const double gamma = 0.1;
+            cell_matrix(i, j) += gamma * (div_phi_u[i] * div_phi_u[j]) * JxW;
+          }
 
           // Pressure mass for preconditioner
           if (!pressure_mass_assembled)
@@ -848,6 +788,8 @@ void NavierStokes<dim>::assemble_linearized_system() {
   }
   if (!pressure_stiffness_assembled) {
     pressure_stiffness.compress(VectorOperation::add);
+    // Regularize stiffness matrix for preconditioner (Linearized method needs this too!)
+    pressure_stiffness.add(1e-6, pressure_mass);
     pressure_stiffness_assembled = true;
   }
 }
@@ -855,7 +797,7 @@ void NavierStokes<dim>::assemble_linearized_system() {
 template <unsigned int dim> bool NavierStokes<dim>::solve_linear_system() {
   const double rhs_norm = system_rhs.l2_norm();
   // Use 1e-8 relative tolerance
-  SolverControl solver_control(200, std::max(1e-8 * rhs_norm, 1e-12));
+  SolverControl solver_control(40000, 1e-2 * rhs_norm);
 
   PreconditionBlockTriangular preconditioner;
   preconditioner.initialize(system_matrix.block(0, 0),

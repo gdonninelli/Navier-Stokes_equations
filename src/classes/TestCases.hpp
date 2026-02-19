@@ -131,7 +131,8 @@ inline BenchmarkTestCase<2>
 make_2D_1(const std::string  &mesh_file,
           TimeScheme          ts     = TimeScheme::BackwardEuler,
           NonlinearMethod     nm     = NonlinearMethod::Newton,
-          double              deltat = -1.0)
+          double              deltat = -1.0,
+          double              t_ramp = 1.0)
 {
   constexpr double H   = 0.41;
   constexpr double U_m = 0.3;
@@ -151,7 +152,7 @@ make_2D_1(const std::string  &mesh_file,
   tc.time_scheme       = ts;
   tc.nonlinear_method  = nm;
   tc.inlet_velocity    =
-    std::make_shared<BenchmarkInletVelocity<2>>(H, U_m, /*time_dep=*/false);
+    std::make_shared<BenchmarkInletVelocity<2>>(H, U_m, /*time_dep=*/false, t_ramp);
   tc.dirichlet_bc      = std::make_shared<ZeroDirichletBC<2>>();
   tc.forcing_term      = std::make_shared<ForcingTerm<2>>();
   tc.initial_condition = std::make_shared<InitialCondition<2>>();
@@ -268,6 +269,7 @@ make_3D_1Z(const std::string  &mesh_file,
   tc.dirichlet_bc      = std::make_shared<ZeroDirichletBC<3>>();
   tc.forcing_term      = std::make_shared<ForcingTerm<3>>();
   tc.initial_condition = std::make_shared<InitialCondition<3>>();
+  tc.use_supg          = true;
   return tc;
 }
 
@@ -307,6 +309,7 @@ make_3D_2Z(const std::string  &mesh_file,
   tc.dirichlet_bc      = std::make_shared<ZeroDirichletBC<3>>();
   tc.forcing_term      = std::make_shared<ForcingTerm<3>>();
   tc.initial_condition = std::make_shared<InitialCondition<3>>();
+  tc.use_supg          = true;
   return tc;
 }
 
@@ -358,6 +361,7 @@ make_3D_3Z(const std::string  &mesh_file,
   tc.dirichlet_bc      = std::make_shared<ZeroDirichletBC<3>>();
   tc.forcing_term      = std::make_shared<ForcingTerm<3>>();
   tc.initial_condition = std::make_shared<InitialCondition<3>>();
+  tc.use_supg          = true;
   return tc;
 }
 

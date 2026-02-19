@@ -218,6 +218,7 @@ struct BenchmarkTestCase
   std::shared_ptr<Function<dim>> dirichlet_bc;
   std::shared_ptr<Function<dim>> forcing_term;
   std::shared_ptr<Function<dim>> initial_condition;
+  bool           use_supg = false; // SUPG/grad-div stabilization (typically true for 3D)
 };
 
 
@@ -413,7 +414,8 @@ public:
                    tc.deltat, tc.T, tc.Re, tc.U_m,
                    tc.time_scheme, tc.nonlinear_method,
                    tc.inlet_velocity, tc.dirichlet_bc,
-                   tc.forcing_term, tc.initial_condition)
+                   tc.forcing_term, tc.initial_condition,
+                   tc.use_supg)
   {}
 
   // -----------------------------------------------------------------------
@@ -433,7 +435,8 @@ public:
     std::shared_ptr<Function<dim>> inlet_velocity_   = nullptr,
     std::shared_ptr<Function<dim>> dirichlet_bc_     = nullptr,
     std::shared_ptr<Function<dim>> forcing_term_     = nullptr,
-    std::shared_ptr<Function<dim>> initial_condition_ = nullptr)
+    std::shared_ptr<Function<dim>> initial_condition_ = nullptr,
+    bool                           use_supg_          = false)
     : mpi_size(Utilities::MPI::n_mpi_processes(MPI_COMM_WORLD))
     , mpi_rank(Utilities::MPI::this_mpi_process(MPI_COMM_WORLD))
     , pcout(std::cout, mpi_rank == 0)
@@ -460,6 +463,7 @@ public:
     , initial_condition(initial_condition_
                           ? initial_condition_
                           : std::make_shared<InitialCondition<dim>>())
+    , use_supg(use_supg_)
   {
     fe = std::make_unique<FESystem<dim>>(FE_SimplexP<dim>(degree_velocity),
                                          dim,
@@ -543,6 +547,7 @@ protected:
   TimeScheme      time_scheme;
   NonlinearMethod nonlinear_method;
   double          theta;  // 1.0 for BE, 0.5 for CN
+  bool            use_supg; // SUPG/grad-div stabilization flag
 
   // Newton solver parameters
   static constexpr unsigned int newton_max_iterations = 50;
