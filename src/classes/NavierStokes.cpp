@@ -315,11 +315,9 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
 
   std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
 
-  // Extractors for FEValues (handle vectors and scalars)
   const FEValuesExtractors::Vector velocities(0);
   const FEValuesExtractors::Scalar pressure(dim);
 
-  // Values of the solution at iteration k (current) and at time n-1 (old)
   std::vector<Tensor<1, dim>> current_velocity_values(n_q_points);
   std::vector<Tensor<2, dim>> current_velocity_gradients(n_q_points);
   std::vector<Tensor<1, dim>> current_velocity_laplacians(n_q_points);
@@ -327,19 +325,15 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
   std::vector<Tensor<1, dim>> current_pressure_gradients(n_q_points);
 
   std::vector<Tensor<1, dim>> old_velocity_values(n_q_points);
-  std::vector<Tensor<2, dim>> old_velocity_gradients(
-      n_q_points); // needed for CN (theta<1)
-  std::vector<Tensor<1, dim>> old_velocity_laplacians(n_q_points);
+  std::vector<Tensor<2, dim>> old_velocity_gradients(n_q_points);
+  std::vector<Tensor<1, dim>> old_velocity_laplacians(n_q_points); // Aggiunto per SUPG RHS
 
-  // Support vectors for phi_u, grad_phi_u, div_phi_u, phi_p, grad_phi_p
   std::vector<Tensor<1, dim>> phi_u(dofs_per_cell);
   std::vector<Tensor<2, dim>> grad_phi_u(dofs_per_cell);
   std::vector<double> div_phi_u(dofs_per_cell);
   std::vector<double> phi_p(dofs_per_cell);
-  std::vector<Tensor<1, dim>> grad_phi_p(
-      dofs_per_cell); // for pressure Laplacian
+  std::vector<Tensor<1, dim>> grad_phi_p(dofs_per_cell);
 
-  // Forcing term evaluation vectors (were missing – needed for residual)
   Vector<double> f_val_new(dim + 1);
   Vector<double> f_val_old(dim + 1);
 
@@ -352,27 +346,19 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
 
       fe_values.reinit(cell);
 
-      // Get current solution
-      fe_values[velocities].get_function_values(current_solution,
-                                                current_velocity_values);
-      fe_values[velocities].get_function_gradients(current_solution,
-                                                   current_velocity_gradients);
-      fe_values[velocities].get_function_laplacians(
-          current_solution, current_velocity_laplacians);
-      fe_values[pressure].get_function_values(current_solution,
-                                              current_pressure_values);
-      fe_values[pressure].get_function_gradients(current_solution,
-                                                 current_pressure_gradients);
+      fe_values[velocities].get_function_values(current_solution, current_velocity_values);
+      fe_values[velocities].get_function_gradients(current_solution, current_velocity_gradients);
+      fe_values[velocities].get_function_laplacians(current_solution, current_velocity_laplacians);
+      fe_values[pressure].get_function_values(current_solution, current_pressure_values);
+      fe_values[pressure].get_function_gradients(current_solution, current_pressure_gradients);
 
-      fe_values[velocities].get_function_values(solution_old,
-                                                old_velocity_values);
-      fe_values[velocities].get_function_gradients(solution_old,
-                                                   old_velocity_gradients);
+      fe_values[velocities].get_function_values(solution_old, old_velocity_values);
+      fe_values[velocities].get_function_gradients(solution_old, old_velocity_gradients);
+      fe_values[velocities].get_function_laplacians(solution_old, old_velocity_laplacians); // Estratto
 
       for (unsigned int q = 0; q < n_q_points; ++q) {
         const double JxW = fe_values.JxW(q);
 
-        // Precompute basis functions + divergence (avoid recomputing in j-loop)
         for (unsigned int k = 0; k < dofs_per_cell; ++k) {
           phi_u[k] = fe_values[velocities].value(k, q);
           grad_phi_u[k] = fe_values[velocities].gradient(k, q);
@@ -381,7 +367,6 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
           grad_phi_p[k] = fe_values[pressure].gradient(k, q);
         }
 
-        // Evaluate forcing at t^{n+1} and t^n (for theta-method)
         const auto &x_q = fe_values.quadrature_point(q);
         forcing_term->set_time(time);
         forcing_term->vector_value(x_q, f_val_new);
@@ -393,7 +378,8 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
           f_old[d] = f_val_old[d];
         }
 
-      double tau = 0.0;
+        // --- Pre-calcolo delle variabili di stabilizzazione (Ottimizzazione) ---
+        double tau = 0.0;
         Tensor<1, dim> strong_res;
         const double gamma = 0.1;
         const double div_u_k = trace(current_velocity_gradients[q]);
@@ -495,7 +481,6 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
   }
   if (!pressure_stiffness_assembled) {
     pressure_stiffness.compress(VectorOperation::add);
-    // Regularize pressure stiffness for the preconditioner!
     pressure_stiffness.add(1e-6, pressure_mass);
     pressure_stiffness_assembled = true;
   }
