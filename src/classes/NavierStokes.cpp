@@ -406,7 +406,7 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
           // Implicit part (at current Newton iterate)
           const double conv_impl =
               theta *
-              (current_velocity_values[q] * current_velocity_gradients[q]) *
+              (current_velocity_gradients[q] * current_velocity_values[q]) *
               phi_u[i];
           const double visc_impl =
               theta * nu *
@@ -415,7 +415,7 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
           // Explicit part (at old time step) — only active for CN (theta<1)
           const double conv_expl =
               (1.0 - theta) *
-              (old_velocity_values[q] * old_velocity_gradients[q]) * phi_u[i];
+              (old_velocity_gradients[q] * old_velocity_values[q]) * phi_u[i];
           const double visc_expl =
               (1.0 - theta) * nu *
               scalar_product(old_velocity_gradients[q], grad_phi_u[i]);
@@ -446,8 +446,8 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
 
             // Linearized Convection (implicit fraction)
             val += theta *
-                   ((current_velocity_values[q] * grad_phi_u[j]) * phi_u[i] +
-                    (phi_u[j] * current_velocity_gradients[q]) * phi_u[i]);
+                   ((grad_phi_u[j] * current_velocity_values[q]) * phi_u[i] +
+                    (current_velocity_gradients[q] * phi_u[j]) * phi_u[i]);
 
             // Pressure: -(p, div v)
             val -= phi_p[j] * div_phi_u[i];
@@ -469,10 +469,10 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
 
               // Termine SUPG: (u . grad phi_i) * tau * (u . grad phi_j + grad
               // psi_j)
-              Tensor<1, dim> supg_test_vec = tau * (current_velocity_values[q] * grad_phi_u[i]);
+              Tensor<1, dim> supg_test_vec = tau * (grad_phi_u[i] * current_velocity_values[q]);
               Tensor<1, dim> op_phi_j = phi_u[j] / deltat;
-              op_phi_j += current_velocity_values[q] * grad_phi_u[j];
-              op_phi_j += phi_u[j] * current_velocity_gradients[q];
+              op_phi_j += grad_phi_u[j] * current_velocity_values[q];
+              op_phi_j += current_velocity_gradients[q] * phi_u[j];
 
               cell_matrix(i, j) += (supg_test_vec * (op_phi_j + grad_phi_p[j])) * JxW;
 
@@ -512,7 +512,7 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
 
             // Convection: u . grad u
             Tensor<1, dim> conv_res =
-                current_velocity_values[q] * current_velocity_gradients[q];
+                current_velocity_gradients[q] * current_velocity_values[q];
 
             // Pressure: grad p
             Tensor<1, dim> pres_res = current_pressure_gradients[q];
@@ -536,7 +536,7 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
             //  New RHS = - [ (Residual_Weak, v) + (Strong_Res, tau_v) ]
             //  Existing code accumulates into cell_rhs: -Weak_Res_Terms.
             //  So we must also subtract the SUPG term.
-            cell_rhs(i) -= (current_velocity_values[q] * grad_phi_u[i]) * tau *
+            cell_rhs(i) -= (grad_phi_u[i] * current_velocity_values[q]) * tau *
                            strong_res * JxW;
           }
         }
@@ -768,7 +768,7 @@ void NavierStokes<dim>::assemble_linearized_system() {
         // -(1-theta) * ((u^n . grad)u^n . phi)
         const double rhs_conv =
             -(1.0 - theta) *
-            ((old_velocity_values[q] * old_velocity_gradients[q]) * phi_u[i]);
+            ((old_velocity_gradients[q] * old_velocity_values[q]) * phi_u[i]);
 
         cell_rhs(i) += (rhs_mass + rhs_visc + rhs_conv) * JxW;
 
@@ -812,7 +812,7 @@ void NavierStokes<dim>::assemble_linearized_system() {
           val += theta * nu * scalar_product(grad_phi_u[i], grad_phi_u[j]);
 
           // Semi-implicit convection: theta * (u* . grad phi_j) . phi_i
-          val += theta * (u_star * grad_phi_u[j]) * phi_u[i];
+          val += theta * (grad_phi_u[j] * u_star) * phi_u[i];
 
           // Pressure: -(psi_j, div phi_i)
           val -= phi_p[j] * div_phi_u[i];
@@ -836,7 +836,7 @@ void NavierStokes<dim>::assemble_linearized_system() {
             const double tau = 1.0 / std::sqrt(std::pow(2.0 / deltat, 2) +
                                                std::pow(2.0 * u_mag / h, 2) +
                                                std::pow(4.0 * nu / (h * h), 2));
-            Tensor<1, dim> supg_test_vec = tau * (u_star * grad_phi_u[i]);
+            Tensor<1, dim> supg_test_vec = tau * (grad_phi_u[i] * u_star);
 
             // Time + Convection part
             Tensor<1, dim> op_phi_j = phi_u[j] / deltat;
@@ -850,8 +850,7 @@ void NavierStokes<dim>::assemble_linearized_system() {
 
             // 1. Time + Convection part (acting on velocity dofs)
             cell_matrix(i, j) +=
-                (supg_test_vec * (phi_u[j] / deltat + u_star * grad_phi_u[j])) *
-                JxW;
+                (supg_test_vec * (phi_u[j] / deltat + grad_phi_u[j] * u_star)) * JxW;
 
             // 2. Pressure Gradient part (acting on pressure dofs)
             // If j is pressure dof, grad_phi_p[j] is the gradient.
