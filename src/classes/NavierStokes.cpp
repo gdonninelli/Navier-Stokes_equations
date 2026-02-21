@@ -4,9 +4,7 @@ template <unsigned int dim> void NavierStokes<dim>::setup() {
   pcout << "===============================================" << std::endl;
   pcout << "Setup..." << std::endl;
 
-  // TODO: Controllare se va bene, proabilmente mesh non nativamente supprotata
-  // da deal.II, quindi dobbiamo leggere in un triangulation seriale e poi
-  // distribuirla. 0. Mesh loading For parallel::fullydistributed::Triangulation
+  // 0. Mesh loading For parallel::fullydistributed::Triangulation
   // we must:
   //   a) Read the mesh into a serial Triangulation
   //   b) Partition it
@@ -178,7 +176,6 @@ template <unsigned int dim> void NavierStokes<dim>::setup() {
             else
               cell->face(f)->set_boundary_id(wall_boundary_id);
           } else if constexpr (dim == 3) {
-            const double x = center[0];
             const double y = center[1];
             const double z = center[2];
             // since the cylinder is alligned with the x-axis, the distance is computed in the yz-plane
@@ -332,6 +329,7 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
   std::vector<Tensor<1, dim>> old_velocity_values(n_q_points);
   std::vector<Tensor<2, dim>> old_velocity_gradients(
       n_q_points); // needed for CN (theta<1)
+  std::vector<Tensor<1, dim>> old_velocity_laplacians(n_q_points);
 
   // Support vectors for phi_u, grad_phi_u, div_phi_u, phi_p, grad_phi_p
   std::vector<Tensor<1, dim>> phi_u(dofs_per_cell);
@@ -395,149 +393,83 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
           f_old[d] = f_val_old[d];
         }
 
+      double tau = 0.0;
+        Tensor<1, dim> strong_res;
+        const double gamma = 0.1;
+        const double div_u_k = trace(current_velocity_gradients[q]);
+
+        if (use_supg) {
+          const double h = cell->diameter();
+          const double u_mag = current_velocity_values[q].norm();
+          tau = 1.0 / std::sqrt(std::pow(2.0 / deltat, 2) +
+                                std::pow(2.0 * u_mag / h, 2) +
+                                std::pow(4.0 * nu / (h * h), 2));
+
+          // Residuo forte coerente con il theta-scheme
+          Tensor<1, dim> time_res = (current_velocity_values[q] - old_velocity_values[q]) / deltat;
+          Tensor<1, dim> conv_res = theta * (current_velocity_gradients[q] * current_velocity_values[q]) +
+                                    (1.0 - theta) * (old_velocity_gradients[q] * old_velocity_values[q]);
+          Tensor<1, dim> pres_res = current_pressure_gradients[q];
+          Tensor<1, dim> visc_res = -nu * (theta * current_velocity_laplacians[q] +
+                                           (1.0 - theta) * old_velocity_laplacians[q]);
+          Tensor<1, dim> force_res = -(theta * f_new + (1.0 - theta) * f_old);
+
+          strong_res = time_res + conv_res + pres_res + visc_res + force_res;
+        }
+
         for (unsigned int i = 0; i < dofs_per_cell; ++i) {
-          // Residual with theta-method (theta=1 BE, theta=0.5 CN)
-
-          // Time term: (u_k - u_old) / dt * v
-          const double time_term =
-              (current_velocity_values[q] - old_velocity_values[q]) * phi_u[i] /
-              deltat;
-
-          // Implicit part (at current Newton iterate)
-          const double conv_impl =
-              theta *
-              (current_velocity_gradients[q] * current_velocity_values[q]) *
-              phi_u[i];
-          const double visc_impl =
-              theta * nu *
-              scalar_product(current_velocity_gradients[q], grad_phi_u[i]);
-
-          // Explicit part (at old time step) — only active for CN (theta<1)
-          const double conv_expl =
-              (1.0 - theta) *
-              (old_velocity_gradients[q] * old_velocity_values[q]) * phi_u[i];
-          const double visc_expl =
-              (1.0 - theta) * nu *
-              scalar_product(old_velocity_gradients[q], grad_phi_u[i]);
-
-          // Pressure term: - p_k * div v (fully implicit)
+          // --- Residuo Standard di Galerkin (RHS) ---
+          const double time_term = (current_velocity_values[q] - old_velocity_values[q]) * phi_u[i] / deltat;
+          const double conv_impl = theta * (current_velocity_gradients[q] * current_velocity_values[q]) * phi_u[i];
+          const double visc_impl = theta * nu * scalar_product(current_velocity_gradients[q], grad_phi_u[i]);
+          const double conv_expl = (1.0 - theta) * (old_velocity_gradients[q] * old_velocity_values[q]) * phi_u[i];
+          const double visc_expl = (1.0 - theta) * nu * scalar_product(old_velocity_gradients[q], grad_phi_u[i]);
           const double pres_term = -current_pressure_values[q] * div_phi_u[i];
+          const double div_term  = -phi_p[i] * div_u_k;
 
-          // Incompressibility term: - q * div u_k (fully implicit)
-          const double div_term =
-              -phi_p[i] * trace(current_velocity_gradients[q]);
+          cell_rhs(i) += (-time_term - conv_impl - visc_impl - conv_expl - visc_expl - pres_term - div_term) * JxW;
+          cell_rhs(i) += (theta * (f_new * phi_u[i]) + (1.0 - theta) * (f_old * phi_u[i])) * JxW;
 
-          cell_rhs(i) += (-time_term - conv_impl - visc_impl - conv_expl -
-                          visc_expl - pres_term - div_term) *
-                         JxW;
+          // --- SUPG & Grad-Div Residuals (RHS) ---
+          if (use_supg) {
+            cell_rhs(i) -= (grad_phi_u[i] * current_velocity_values[q]) * tau * strong_res * JxW;
+            cell_rhs(i) -= gamma * div_u_k * div_phi_u[i] * JxW; // Correzione Grad-Div RHS
+          }
 
-          // Forcing: +theta*f^{n+1} . phi + (1-theta)*f^n . phi
-          // (This is part of -R: the forcing has a + sign in the
-          //  momentum equation, so it enters the RHS = -R with + sign.)
-          cell_rhs(i) += (theta * (f_new * phi_u[i]) +
-                          (1.0 - theta) * (f_old * phi_u[i])) *
-                         JxW;
-
-          // Newton Jacobian with theta-method
+          // --- Newton Jacobian (LHS) ---
           for (unsigned int j = 0; j < dofs_per_cell; ++j) {
             double val = (phi_u[i] * phi_u[j]) / deltat;
-
             val += theta * nu * scalar_product(grad_phi_u[i], grad_phi_u[j]);
-
-            // Linearized Convection (implicit fraction)
-            val += theta *
-                   ((grad_phi_u[j] * current_velocity_values[q]) * phi_u[i] +
-                    (current_velocity_gradients[q] * phi_u[j]) * phi_u[i]);
-
-            // Pressure: -(p, div v)
+            val += theta * ((grad_phi_u[j] * current_velocity_values[q]) * phi_u[i] +
+                            (current_velocity_gradients[q] * phi_u[j]) * phi_u[i]);
             val -= phi_p[j] * div_phi_u[i];
-
-            // Divergence: -(q, div u)
             val -= phi_p[i] * div_phi_u[j];
 
             cell_matrix(i, j) += val * JxW;
 
-            // --- SUPG Stabilization (LHS) ---
-            // Parametro Tau
+            // --- SUPG & Grad-Div Jacobian (LHS) ---
             if (use_supg) {
-              const double h = cell->diameter();
-              const double u_mag = current_velocity_values[q].norm();
-              // Formula: tau = ((2/dt)^2 + (2|u|/h)^2 + (4nu/h^2)^2)^(-0.5)
-              const double tau = 1.0 / std::sqrt(std::pow(2.0 / deltat, 2) +
-                                               std::pow(2.0 * u_mag / h, 2) +
-                                               std::pow(4.0 * nu / (h * h), 2));
-
-              // Termine SUPG: (u . grad phi_i) * tau * (u . grad phi_j + grad
-              // psi_j)
+              // 1. Termine lineare standard su \delta u
               Tensor<1, dim> supg_test_vec = tau * (grad_phi_u[i] * current_velocity_values[q]);
               Tensor<1, dim> op_phi_j = phi_u[j] / deltat;
-              op_phi_j += grad_phi_u[j] * current_velocity_values[q];
-              op_phi_j += current_velocity_gradients[q] * phi_u[j];
+              op_phi_j += theta * (grad_phi_u[j] * current_velocity_values[q]); // Correzione theta
+              op_phi_j += theta * (current_velocity_gradients[q] * phi_u[j]);   // Correzione theta
 
               cell_matrix(i, j) += (supg_test_vec * (op_phi_j + grad_phi_p[j])) * JxW;
 
-              // --- Grad-Div Stabilization (LHS) ---
-              // gamma * (div phi_i * div phi_j)
-              const double gamma = 0.1;
-              const double grad_div_lhs = gamma * (div_phi_u[i] * div_phi_u[j]);
-              cell_matrix(i, j) += grad_div_lhs * JxW;
+              // 2. Differenziazione della funzione di test SUPG (assicura convergenza quadratica Newton)
+              Tensor<1, dim> delta_test = tau * (grad_phi_u[i] * phi_u[j]);
+              cell_matrix(i, j) += (delta_test * strong_res) * JxW;
+
+              // Grad-Div LHS
+              cell_matrix(i, j) += gamma * (div_phi_u[i] * div_phi_u[j]) * JxW;
             }
 
-            // Pressure mass matrix for preconditioner
             if (!pressure_mass_assembled)
               cell_pressure_mass(i, j) += phi_p[i] * phi_p[j] * JxW;
 
-            // Pressure stiffness (Laplacian) for Cahouet-Chabard preconditioner
             if (!pressure_stiffness_assembled)
               cell_pressure_stiff(i, j) += grad_phi_p[i] * grad_phi_p[j] * JxW;
-          }
-
-          // --- SUPG Stabilization (RHS Residual) ---
-          if (use_supg) {
-            // Recompute tau locally (redundant computation but cleaner scope,
-            // valid since q is same)
-            const double h = cell->diameter();
-            const double u_mag = current_velocity_values[q].norm();
-            const double tau = 1.0 / std::sqrt(std::pow(2.0 / deltat, 2) +
-                                               std::pow(2.0 * u_mag / h, 2) +
-                                               std::pow(4.0 * nu / (h * h), 2));
-
-            // Strong Residual Calculation
-            // Time term: (u - u_old)/dt  (Backward Euler approx for residual or
-            // consistent with theta?) Linearized residual uses (u - u_old)/dt
-            // approx usually. Let's use the same time term as in weak form: (u
-            // - u_old)/dt
-            Tensor<1, dim> time_res =
-                (current_velocity_values[q] - old_velocity_values[q]) / deltat;
-
-            // Convection: u . grad u
-            Tensor<1, dim> conv_res =
-                current_velocity_gradients[q] * current_velocity_values[q];
-
-            // Pressure: grad p
-            Tensor<1, dim> pres_res = current_pressure_gradients[q];
-
-            // Viscosity: -nu Delta u
-            Tensor<1, dim> visc_res = -nu * current_velocity_laplacians[q];
-
-            // Forcing: -f (evaluated at t^{n+theta})
-            Tensor<1, dim> force_res = -(theta * f_new + (1.0 - theta) * f_old);
-
-            // Total Strong Momentum Residual
-            Tensor<1, dim> strong_res =
-                time_res + conv_res + pres_res + visc_res + force_res;
-
-            // Subtract (tau * u . grad phi_i) * strong_res from RHS
-            // (The RHS vector accumulates -Residual, so we subtract valid SUPG
-            // term from valid Residual?
-            //  No, RHS = -Residual.
-            //  Standard weak form: (R, v) + (R_strong, tau u.grad v) = 0
-            //  => (R, v) = - (R_strong, tau u.grad v)
-            //  New RHS = - [ (Residual_Weak, v) + (Strong_Res, tau_v) ]
-            //  Existing code accumulates into cell_rhs: -Weak_Res_Terms.
-            //  So we must also subtract the SUPG term.
-            cell_rhs(i) -= (grad_phi_u[i] * current_velocity_values[q]) * tau *
-                           strong_res * JxW;
           }
         }
       }
@@ -629,14 +561,7 @@ void NavierStokes<dim>::assemble_linearized_system() {
   // Old solution values
   std::vector<Tensor<1, dim>> old_velocity_values(n_q_points);
   std::vector<Tensor<2, dim>> old_velocity_gradients(n_q_points);
-  std::vector<Tensor<1, dim>> old_velocity_laplacians(
-      n_q_points); // Assuming we can get laplacians of old solution if
-                   // needed?
-  // Actually we need laplacians of phi_j (trial functions) for LHS
-  // consistency, and laplacians of u_old only for RHS time term consistency?
-  // For linearized, we need to apply the operator to the trial function.
-  // Op(phi_j) = ... - nu * Delta phi_j ...
-  // So we need hessians of the FE shape functions.
+  std::vector<Tensor<1, dim>> old_velocity_laplacians(n_q_points); 
   std::vector<Tensor<1, dim>> phi_u_lapl(dofs_per_cell);
 
   std::vector<Tensor<1, dim>> old_old_velocity_values(n_q_points);
@@ -707,8 +632,7 @@ void NavierStokes<dim>::assemble_linearized_system() {
       else {
         u_star = 2.0 * old_velocity_values[q] -
                  old_old_velocity_values[q]; // 2nd-order: u* = 2u^n - u^{n-1}
-        // Safety clamp: se u_star cresce più del 20% rispetto a u^n, ricada
-        // su u^n
+        // Safety clamp: if u_star grows more than 20% compared to u^n, fall back to u^n 
         const double norm_star = u_star.norm();
         const double norm_old = old_velocity_values[q].norm();
         if (norm_old > 1e-12 && norm_star > 1.2 * norm_old)
@@ -722,24 +646,6 @@ void NavierStokes<dim>::assemble_linearized_system() {
         div_phi_u[k] = fe_values[velocities].divergence(k, q);
         phi_p[k] = fe_values[pressure].value(k, q);
         grad_phi_p[k] = fe_values[pressure].gradient(k, q);
-        // Laplacian of velocity shape function
-        // We need to fetch it from fe_values using the shape_hessian or some
-        // component method? FEValues::shape_hessian gives full hessian. Trace
-        // is Laplacian. Helper:
-
-        // Vector FE: hessian(k,q) returns Tensor<3,dim> if k is vector
-        // component index? Actually fe_values[velocities].hessian(k,q)
-        // returns Tensor<2,dim> which is the hessian of the scalar shape
-        // function? No, velocities is a vector extractor. Let's use the
-        // explicit computed Laplacian if possible, but FESystem shape
-        // functions are tricky. For now, let's assume -nu*Delta u is small
-        // and neglect it in the LHS operator for SUPG consistency OR compute
-        // it properly. Given the user instructions, they didn't ask for full
-        // consistency in LHS, just "SUPG". "1. SUPG ... Formula: ... (u_conv
-        // * grad(phi_i)) * tau * (u_conv * grad(phi_i))" That formula
-        // corresponds to Convection-Convection only. I will stick to what the
-        // user asked for in LHS to avoid compilation headaches with shape
-        // laplacians.
       }
 
       // Evaluate forcing term at t^{n+1} and t^n
@@ -799,7 +705,11 @@ void NavierStokes<dim>::assemble_linearized_system() {
           Tensor<1, dim> rhs_source =
               forcing_rhs + old_velocity_values[q] / deltat;
 
-          cell_rhs(i) += (supg_test_vec * rhs_source) * JxW;
+          // Grad-Div stabilization
+          const double gamma = 0.1;
+          const double div_u_k = trace(current_velocity_gradients[q]);
+          
+          cell_rhs(i) -= gamma * div_u_k * div_phi_u[i] * JxW;
         }
 
         // LHS: matrix entries
@@ -823,13 +733,6 @@ void NavierStokes<dim>::assemble_linearized_system() {
           cell_matrix(i, j) += val * JxW;
 
           // --- SUPG Stabilization (Linearized LHS) ---
-          // Added term: (supg_test_vec, LinearOperator(phi_j))
-          // LinearOperator(phi_j) approx: phi_j/dt + u*.grad phi_j + grad
-          // psi_j Note: neglecting -nu Delta phi_j (consistent with user
-          // request)
-
-          // Re-calculate supg_test_vec (needed here as i is outer loop, but j
-          // changes) Wait, i is fixed in this inner loop.
           if (use_supg) {
             const double h = cell->diameter();
             const double u_mag = u_star.norm();
@@ -841,21 +744,12 @@ void NavierStokes<dim>::assemble_linearized_system() {
             // Time + Convection part
             Tensor<1, dim> op_phi_j = phi_u[j] / deltat;
             op_phi_j += u_star * grad_phi_u[j]; // Convection
-            // op_phi_j += grad_phi_p[j]; // Pressure gradient? phi_p is scalar
-            // pressure shape. Wait. j iterates dofs_per_cell. If j corresponds
-            // to velocity dof, phi_u[j] is nonzero, phi_p[j] is zero? Yes. But
-            // grad_phi_p[j] is only non-zero if j is pressure dof. But op_phi_j
-            // vector is momentum equation residual. If j is pressure dof, then
-            // phi_u[j]=0. The term is grad psi_j. So we strictly add:
 
             // 1. Time + Convection part (acting on velocity dofs)
             cell_matrix(i, j) +=
                 (supg_test_vec * (phi_u[j] / deltat + grad_phi_u[j] * u_star)) * JxW;
 
             // 2. Pressure Gradient part (acting on pressure dofs)
-            // If j is pressure dof, grad_phi_p[j] is the gradient.
-            // (supg_test_vec * grad_phi_p[j])
-            // Note: grad_phi_p[j] is vector.
             cell_matrix(i, j) += (supg_test_vec * grad_phi_p[j]) * JxW;
 
             // --- Grad-Div Stabilization ---
@@ -985,10 +879,6 @@ double NavierStokes<dim>::compute_pressure_difference() {
   return evaluate_pressure(p_front) - evaluate_pressure(p_end);
 }
 
-// TODO we have to check if the direction of the flux in 3D is really in the z
-// direction
-// TODO in this case is set different from the paper (where it is along the x
-// direction)
 template <unsigned int dim>
 void NavierStokes<dim>::compute_lift_drag(double &drag_coeff,
                                           double &lift_coeff) const {
