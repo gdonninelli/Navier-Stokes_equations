@@ -127,7 +127,8 @@ template <unsigned int dim> void NavierStokes<dim>::setup() {
 
     // Safety check: if expected IDs are missing, assign them geometrically
     // Also checking outlet (102) to ensure it is correctly assigned
-    bool has_inlet = false, has_walls = false, has_cylinder = false, has_outlet = false;
+    bool has_inlet = false, has_walls = false, has_cylinder = false,
+         has_outlet = false;
     for (auto id : ids) {
       if (id == inlet_boundary_id)
         has_inlet = true;
@@ -140,8 +141,8 @@ template <unsigned int dim> void NavierStokes<dim>::setup() {
     }
 
     // In parallel, 'ids' only contains locally seen IDs.
-    // We trust that if the mesh is partitioned, at least one proc sees each boundary.
-    // Local check: if *I* don't see outlet, *I* run the check.
+    // We trust that if the mesh is partitioned, at least one proc sees each
+    // boundary. Local check: if *I* don't see outlet, *I* run the check.
 
     if (!has_inlet || !has_walls || !has_cylinder || !has_outlet) {
       pcout << "  WARNING: Expected boundary IDs not found! "
@@ -181,7 +182,8 @@ template <unsigned int dim> void NavierStokes<dim>::setup() {
             const double x = center[0];
             const double y = center[1];
             const double z = center[2];
-            // since the cylinder is alligned with the x-axis, the distance is computed in the yz-plane
+            // since the cylinder is alligned with the x-axis, the distance is
+            // computed in the yz-plane
             const double dist_cyl =
                 std::sqrt((y - cy) * (y - cy) + (z - cz) * (z - cz));
 
@@ -256,7 +258,7 @@ template <unsigned int dim> void NavierStokes<dim>::setup() {
         *mapping, dof_handler, cylinder_boundary_id,
         Functions::ZeroFunction<dim>(dim + 1), newton_constraints, vel_mask);
 
-            // Pin pressure at outlet to remove nullspace from K_p and system matrix
+    // Pin pressure at outlet to remove nullspace from K_p and system matrix
     const FEValuesExtractors::Scalar pressure_ext(dim);
     const ComponentMask press_mask = fe->component_mask(pressure_ext);
     VectorTools::interpolate_boundary_values(
@@ -282,8 +284,7 @@ template <unsigned int dim> void NavierStokes<dim>::setup() {
     AffineConstraints<double> empty_constraints;
     empty_constraints.reinit(locally_relevant_dofs);
     empty_constraints.close();
-    DoFTools::make_sparsity_pattern(dof_handler, bdsp, empty_constraints,
-                                    true);
+    DoFTools::make_sparsity_pattern(dof_handler, bdsp, empty_constraints, true);
     SparsityTools::distribute_sparsity_pattern(
         bdsp, Utilities::MPI::all_gather(MPI_COMM_WORLD, locally_owned_dofs),
         MPI_COMM_WORLD, locally_relevant_dofs);
@@ -463,18 +464,21 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
               const double h = cell->diameter();
               const double u_mag = current_velocity_values[q].norm();
               // Formula: tau = ((2/dt)^2 + (2|u|/h)^2 + (4nu/h^2)^2)^(-0.5)
-              const double tau = 1.0 / std::sqrt(std::pow(2.0 / deltat, 2) +
-                                               std::pow(2.0 * u_mag / h, 2) +
-                                               std::pow(4.0 * nu / (h * h), 2));
+              const double tau =
+                  1.0 / std::sqrt(std::pow(2.0 / deltat, 2) +
+                                  std::pow(2.0 * u_mag / h, 2) +
+                                  std::pow(4.0 * nu / (h * h), 2));
 
               // Termine SUPG: (u . grad phi_i) * tau * (u . grad phi_j + grad
               // psi_j)
-              Tensor<1, dim> supg_test_vec = tau * (grad_phi_u[i] * current_velocity_values[q]);
+              Tensor<1, dim> supg_test_vec =
+                  tau * (grad_phi_u[i] * current_velocity_values[q]);
               Tensor<1, dim> op_phi_j = phi_u[j] / deltat;
               op_phi_j += grad_phi_u[j] * current_velocity_values[q];
               op_phi_j += current_velocity_gradients[q] * phi_u[j];
 
-              cell_matrix(i, j) += (supg_test_vec * (op_phi_j + grad_phi_p[j])) * JxW;
+              cell_matrix(i, j) +=
+                  (supg_test_vec * (op_phi_j + grad_phi_p[j])) * JxW;
 
               // --- Grad-Div Stabilization (LHS) ---
               // gamma * (div phi_i * div phi_j)
@@ -573,7 +577,7 @@ template <unsigned int dim> void NavierStokes<dim>::solve_newton_system() {
   const double rhs_norm = system_rhs.l2_norm();
 
   // Usiamo una tolleranza di 1e-8
-  SolverControl solver_control(40000, 1e-2 * rhs_norm);
+  SolverControl solver_control(200, 1e-2 * rhs_norm);
 
   // Cahouet-Chabard preconditioner:
   //   Velocity block: ILU (robust for convection-dominated)
@@ -783,8 +787,8 @@ void NavierStokes<dim>::assemble_linearized_system() {
           const double h = cell->diameter();
           const double u_mag = u_star.norm();
           const double tau = 1.0 / std::sqrt(std::pow(2.0 / deltat, 2) +
-                                           std::pow(2.0 * u_mag / h, 2) +
-                                           std::pow(4.0 * nu / (h * h), 2));
+                                             std::pow(2.0 * u_mag / h, 2) +
+                                             std::pow(4.0 * nu / (h * h), 2));
 
           // SUPG Test Function: w_SUPG = tau * (u_star . grad phi_i)
           // SUPG Test Function vector: w_SUPG = tau * (u_star . grad phi_i)
@@ -850,7 +854,8 @@ void NavierStokes<dim>::assemble_linearized_system() {
 
             // 1. Time + Convection part (acting on velocity dofs)
             cell_matrix(i, j) +=
-                (supg_test_vec * (phi_u[j] / deltat + grad_phi_u[j] * u_star)) * JxW;
+                (supg_test_vec * (phi_u[j] / deltat + grad_phi_u[j] * u_star)) *
+                JxW;
 
             // 2. Pressure Gradient part (acting on pressure dofs)
             // If j is pressure dof, grad_phi_p[j] is the gradient.
@@ -862,7 +867,7 @@ void NavierStokes<dim>::assemble_linearized_system() {
             // gamma * (div phi_i * div phi_j)
             const double gamma = 0.1;
             cell_matrix(i, j) += gamma * (div_phi_u[i] * div_phi_u[j]) * JxW;
-            }
+          }
 
           // Pressure mass for preconditioner
           if (!pressure_mass_assembled)
@@ -895,7 +900,8 @@ void NavierStokes<dim>::assemble_linearized_system() {
   }
   if (!pressure_stiffness_assembled) {
     pressure_stiffness.compress(VectorOperation::add);
-    // Regularize stiffness matrix for preconditioner (Linearized method needs this too!)
+    // Regularize stiffness matrix for preconditioner (Linearized method needs
+    // this too!)
     pressure_stiffness.add(1e-6, pressure_mass);
     pressure_stiffness_assembled = true;
   }
@@ -904,7 +910,7 @@ void NavierStokes<dim>::assemble_linearized_system() {
 template <unsigned int dim> bool NavierStokes<dim>::solve_linear_system() {
   const double rhs_norm = system_rhs.l2_norm();
   // Use 1e-8 relative tolerance
-  SolverControl solver_control(40000, 1e-2 * rhs_norm);
+  SolverControl solver_control(200, 1e-2 * rhs_norm);
 
   PreconditionBlockTriangular preconditioner;
   preconditioner.initialize(system_matrix.block(0, 0),
@@ -1049,7 +1055,7 @@ void NavierStokes<dim>::compute_lift_drag(double &drag_coeff,
 
             // Local force = stress * normal
             // Negative sign because force on fluid is -force on cylinder
-            Tensor<1, dim> force_loc = -(stress * normal); 
+            Tensor<1, dim> force_loc = -(stress * normal);
 
             force_x += force_loc[0] * JxW;
             force_y += force_loc[1] * JxW; // Lift direction
@@ -1120,7 +1126,8 @@ void NavierStokes<dim>::output(const unsigned int time_step) {
 
   data_out.build_patches(*mapping);
 
-  data_out.write_vtu_with_pvtu_record("./", "solution", time_step, MPI_COMM_WORLD, 4);
+  data_out.write_vtu_with_pvtu_record("./", "solution", time_step,
+                                      MPI_COMM_WORLD, 4);
 }
 
 template <unsigned int dim> void NavierStokes<dim>::run() {
@@ -1176,22 +1183,26 @@ template <unsigned int dim> void NavierStokes<dim>::run() {
 
     {
       Point<dim> p_inlet;
-      if (dim == 2) p_inlet = Point<dim>(0, H/2.0);      
-      else          p_inlet = Point<dim>(0, H/2.0, H/2.0);
-        
-      double u_current_real = inlet_velocity->value(p_inlet, (dim==2 ? 0 : 2));
+      if (dim == 2)
+        p_inlet = Point<dim>(0, H / 2.0);
+      else
+        p_inlet = Point<dim>(0, H / 2.0, H / 2.0);
+
+      double u_current_real =
+          inlet_velocity->value(p_inlet, (dim == 2 ? 0 : 2));
 
       double u_case3_theoretical = U_m * std::sin(M_PI * time / 8.0);
 
       if (std::abs(u_current_real - u_case3_theoretical) < 1e-4 && time > 0.0) {
-            
-        double u_mean_instant = (dim == 2) ? (2.0/3.0 * u_current_real) : (4.0/9.0 * u_current_real);
+
+        double u_mean_instant = (dim == 2) ? (2.0 / 3.0 * u_current_real)
+                                           : (4.0 / 9.0 * u_current_real);
         double re_instant = (u_mean_instant * D) / nu;
 
         if (mpi_rank == 0) {
-              pcout << "   Instantaneous Re: " << re_instant << std::endl;
-          }
+          pcout << "   Instantaneous Re: " << re_instant << std::endl;
         }
+      }
     }
 
     auto wall_start = std::chrono::high_resolution_clock::now();
