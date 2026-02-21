@@ -142,7 +142,7 @@ template <unsigned int dim> void NavierStokes<dim>::setup() {
     // In parallel, 'ids' only contains locally seen IDs.
     // We trust that if the mesh is partitioned, at least one proc sees each boundary.
     // Local check: if *I* don't see outlet, *I* run the check.
-    
+
     if (!has_inlet || !has_walls || !has_cylinder || !has_outlet) {
       pcout << "  WARNING: Expected boundary IDs not found! "
             << "Assigning boundary IDs geometrically..." << std::endl;
@@ -150,6 +150,7 @@ template <unsigned int dim> void NavierStokes<dim>::setup() {
       const double tol = 1e-6;
       const double cx = 0.2;
       const double cy = 0.2;
+      const double cz = 0.45;
       const double L = 2.2;
       const double r_cyl = D / 2.0;
 
@@ -180,8 +181,9 @@ template <unsigned int dim> void NavierStokes<dim>::setup() {
             const double x = center[0];
             const double y = center[1];
             const double z = center[2];
+            // since the cylinder is alligned with the x-axis, the distance is computed in the yz-plane
             const double dist_cyl =
-                std::sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy));
+                std::sqrt((y - cy) * (y - cy) + (z - cz) * (z - cz));
 
             if (dist_cyl < r_cyl + 0.02)
               cell->face(f)->set_boundary_id(cylinder_boundary_id);
@@ -253,8 +255,8 @@ template <unsigned int dim> void NavierStokes<dim>::setup() {
     VectorTools::interpolate_boundary_values(
         *mapping, dof_handler, cylinder_boundary_id,
         Functions::ZeroFunction<dim>(dim + 1), newton_constraints, vel_mask);
-    
-    // Pin pressure at outlet to remove nullspace from K_p and system matrix
+
+            // Pin pressure at outlet to remove nullspace from K_p and system matrix
     const FEValuesExtractors::Scalar pressure_ext(dim);
     const ComponentMask press_mask = fe->component_mask(pressure_ext);
     VectorTools::interpolate_boundary_values(
@@ -303,7 +305,7 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
     pressure_stiffness = 0;
 
   FEValues<dim> fe_values(*mapping, *fe, *quadrature,
-                          update_values | update_gradients |
+                          update_values | update_gradients | update_hessians |
                               update_quadrature_points | update_JxW_values);
 
   const unsigned int dofs_per_cell = fe->dofs_per_cell;
@@ -323,7 +325,9 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
   // Values of the solution at iteration k (current) and at time n-1 (old)
   std::vector<Tensor<1, dim>> current_velocity_values(n_q_points);
   std::vector<Tensor<2, dim>> current_velocity_gradients(n_q_points);
+  std::vector<Tensor<1, dim>> current_velocity_laplacians(n_q_points);
   std::vector<double> current_pressure_values(n_q_points);
+  std::vector<Tensor<1, dim>> current_pressure_gradients(n_q_points);
 
   std::vector<Tensor<1, dim>> old_velocity_values(n_q_points);
   std::vector<Tensor<2, dim>> old_velocity_gradients(
@@ -355,8 +359,12 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
                                                 current_velocity_values);
       fe_values[velocities].get_function_gradients(current_solution,
                                                    current_velocity_gradients);
+      fe_values[velocities].get_function_laplacians(
+          current_solution, current_velocity_laplacians);
       fe_values[pressure].get_function_values(current_solution,
                                               current_pressure_values);
+      fe_values[pressure].get_function_gradients(current_solution,
+                                                 current_pressure_gradients);
 
       fe_values[velocities].get_function_values(solution_old,
                                                 old_velocity_values);
@@ -449,6 +457,32 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
 
             cell_matrix(i, j) += val * JxW;
 
+            // --- SUPG Stabilization (LHS) ---
+            // Parametro Tau
+            if (use_supg) {
+              const double h = cell->diameter();
+              const double u_mag = current_velocity_values[q].norm();
+              // Formula: tau = ((2/dt)^2 + (2|u|/h)^2 + (4nu/h^2)^2)^(-0.5)
+              const double tau = 1.0 / std::sqrt(std::pow(2.0 / deltat, 2) +
+                                               std::pow(2.0 * u_mag / h, 2) +
+                                               std::pow(4.0 * nu / (h * h), 2));
+
+              // Termine SUPG: (u . grad phi_i) * tau * (u . grad phi_j + grad
+              // psi_j)
+              Tensor<1, dim> supg_test_vec = tau * (current_velocity_values[q] * grad_phi_u[i]);
+              Tensor<1, dim> op_phi_j = phi_u[j] / deltat;
+              op_phi_j += current_velocity_values[q] * grad_phi_u[j];
+              op_phi_j += phi_u[j] * current_velocity_gradients[q];
+
+              cell_matrix(i, j) += (supg_test_vec * (op_phi_j + grad_phi_p[j])) * JxW;
+
+              // --- Grad-Div Stabilization (LHS) ---
+              // gamma * (div phi_i * div phi_j)
+              const double gamma = 0.1;
+              const double grad_div_lhs = gamma * (div_phi_u[i] * div_phi_u[j]);
+              cell_matrix(i, j) += grad_div_lhs * JxW;
+            }
+
             // Pressure mass matrix for preconditioner
             if (!pressure_mass_assembled)
               cell_pressure_mass(i, j) += phi_p[i] * phi_p[j] * JxW;
@@ -456,6 +490,54 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
             // Pressure stiffness (Laplacian) for Cahouet-Chabard preconditioner
             if (!pressure_stiffness_assembled)
               cell_pressure_stiff(i, j) += grad_phi_p[i] * grad_phi_p[j] * JxW;
+          }
+
+          // --- SUPG Stabilization (RHS Residual) ---
+          if (use_supg) {
+            // Recompute tau locally (redundant computation but cleaner scope,
+            // valid since q is same)
+            const double h = cell->diameter();
+            const double u_mag = current_velocity_values[q].norm();
+            const double tau = 1.0 / std::sqrt(std::pow(2.0 / deltat, 2) +
+                                               std::pow(2.0 * u_mag / h, 2) +
+                                               std::pow(4.0 * nu / (h * h), 2));
+
+            // Strong Residual Calculation
+            // Time term: (u - u_old)/dt  (Backward Euler approx for residual or
+            // consistent with theta?) Linearized residual uses (u - u_old)/dt
+            // approx usually. Let's use the same time term as in weak form: (u
+            // - u_old)/dt
+            Tensor<1, dim> time_res =
+                (current_velocity_values[q] - old_velocity_values[q]) / deltat;
+
+            // Convection: u . grad u
+            Tensor<1, dim> conv_res =
+                current_velocity_values[q] * current_velocity_gradients[q];
+
+            // Pressure: grad p
+            Tensor<1, dim> pres_res = current_pressure_gradients[q];
+
+            // Viscosity: -nu Delta u
+            Tensor<1, dim> visc_res = -nu * current_velocity_laplacians[q];
+
+            // Forcing: -f (evaluated at t^{n+theta})
+            Tensor<1, dim> force_res = -(theta * f_new + (1.0 - theta) * f_old);
+
+            // Total Strong Momentum Residual
+            Tensor<1, dim> strong_res =
+                time_res + conv_res + pres_res + visc_res + force_res;
+
+            // Subtract (tau * u . grad phi_i) * strong_res from RHS
+            // (The RHS vector accumulates -Residual, so we subtract valid SUPG
+            // term from valid Residual?
+            //  No, RHS = -Residual.
+            //  Standard weak form: (R, v) + (R_strong, tau u.grad v) = 0
+            //  => (R, v) = - (R_strong, tau u.grad v)
+            //  New RHS = - [ (Residual_Weak, v) + (Strong_Res, tau_v) ]
+            //  Existing code accumulates into cell_rhs: -Weak_Res_Terms.
+            //  So we must also subtract the SUPG term.
+            cell_rhs(i) -= (current_velocity_values[q] * grad_phi_u[i]) * tau *
+                           strong_res * JxW;
           }
         }
       }
@@ -695,20 +777,25 @@ void NavierStokes<dim>::assemble_linearized_system() {
             (theta * (f_new * phi_u[i]) + (1.0 - theta) * (f_old * phi_u[i])) *
             JxW;
 
-        // --- SUPG Stabilization (Linearized RHS) ---
+        // --- SUPG Stabilization (Linearized) ---
+        // Calculate Tau
         if (use_supg) {
-          // Calculate Tau
           const double h = cell->diameter();
           const double u_mag = u_star.norm();
           const double tau = 1.0 / std::sqrt(std::pow(2.0 / deltat, 2) +
-                                             std::pow(2.0 * u_mag / h, 2) +
-                                             std::pow(4.0 * nu / (h * h), 2));
+                                           std::pow(2.0 * u_mag / h, 2) +
+                                           std::pow(4.0 * nu / (h * h), 2));
 
+          // SUPG Test Function: w_SUPG = tau * (u_star . grad phi_i)
           // SUPG Test Function vector: w_SUPG = tau * (u_star . grad phi_i)
           Tensor<1, dim> supg_test_vec = tau * (u_star * grad_phi_u[i]);
 
-          // SUPG RHS Consistency
+          // --- SUPG RHS Consistency ---
+          // Forcing term (theta-method)
           Tensor<1, dim> forcing_rhs = (theta * f_new + (1.0 - theta) * f_old);
+
+          // RHS contribution: (supg_test_vec) dot (RHS_source)
+          // RHS_source = f + u_old/dt
           Tensor<1, dim> rhs_source =
               forcing_rhs + old_velocity_values[q] / deltat;
 
@@ -735,7 +822,14 @@ void NavierStokes<dim>::assemble_linearized_system() {
 
           cell_matrix(i, j) += val * JxW;
 
-          // --- SUPG + Grad-Div Stabilization (Linearized LHS) ---
+          // --- SUPG Stabilization (Linearized LHS) ---
+          // Added term: (supg_test_vec, LinearOperator(phi_j))
+          // LinearOperator(phi_j) approx: phi_j/dt + u*.grad phi_j + grad
+          // psi_j Note: neglecting -nu Delta phi_j (consistent with user
+          // request)
+
+          // Re-calculate supg_test_vec (needed here as i is outer loop, but j
+          // changes) Wait, i is fixed in this inner loop.
           if (use_supg) {
             const double h = cell->diameter();
             const double u_mag = u_star.norm();
@@ -745,17 +839,31 @@ void NavierStokes<dim>::assemble_linearized_system() {
             Tensor<1, dim> supg_test_vec = tau * (u_star * grad_phi_u[i]);
 
             // Time + Convection part
+            Tensor<1, dim> op_phi_j = phi_u[j] / deltat;
+            op_phi_j += u_star * grad_phi_u[j]; // Convection
+            // op_phi_j += grad_phi_p[j]; // Pressure gradient? phi_p is scalar
+            // pressure shape. Wait. j iterates dofs_per_cell. If j corresponds
+            // to velocity dof, phi_u[j] is nonzero, phi_p[j] is zero? Yes. But
+            // grad_phi_p[j] is only non-zero if j is pressure dof. But op_phi_j
+            // vector is momentum equation residual. If j is pressure dof, then
+            // phi_u[j]=0. The term is grad psi_j. So we strictly add:
+
+            // 1. Time + Convection part (acting on velocity dofs)
             cell_matrix(i, j) +=
                 (supg_test_vec * (phi_u[j] / deltat + u_star * grad_phi_u[j])) *
                 JxW;
 
-            // Pressure Gradient part
+            // 2. Pressure Gradient part (acting on pressure dofs)
+            // If j is pressure dof, grad_phi_p[j] is the gradient.
+            // (supg_test_vec * grad_phi_p[j])
+            // Note: grad_phi_p[j] is vector.
             cell_matrix(i, j) += (supg_test_vec * grad_phi_p[j]) * JxW;
 
-            // Grad-Div: gamma * (div phi_i * div phi_j)
+            // --- Grad-Div Stabilization ---
+            // gamma * (div phi_i * div phi_j)
             const double gamma = 0.1;
             cell_matrix(i, j) += gamma * (div_phi_u[i] * div_phi_u[j]) * JxW;
-          }
+            }
 
           // Pressure mass for preconditioner
           if (!pressure_mass_assembled)
