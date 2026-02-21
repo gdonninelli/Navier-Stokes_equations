@@ -166,7 +166,7 @@ make_2D_1(const std::string  &mesh_file,
 //          max C_D, max C_L, Strouhal number St, ΔP at t with C_L_max
 inline BenchmarkTestCase<2>
 make_2D_2(const std::string  &mesh_file,
-          TimeScheme          ts     = TimeScheme::BackwardEuler,
+          TimeScheme          ts     = TimeScheme::CrankNicolson,
           NonlinearMethod     nm     = NonlinearMethod::Linearized,
           double              deltat = -1.0)
 {
@@ -207,7 +207,7 @@ make_2D_2(const std::string  &mesh_file,
 //          max C_D, max C_L, ΔP(t=8)
 inline BenchmarkTestCase<2>
 make_2D_3(const std::string  &mesh_file,
-          TimeScheme          ts     = TimeScheme::BackwardEuler,
+          TimeScheme          ts     = TimeScheme::CrankNicolson,
           NonlinearMethod     nm     = NonlinearMethod::Linearized,
           double              deltat = -1.0)
 {
