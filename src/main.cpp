@@ -8,23 +8,8 @@ int main(int argc, char *argv[])
 
     Utilities::MPI::MPI_InitFinalize mpi_initialization(argc, argv, 1);
 
-    // Schäfer-Turek 1996 benchmark test cases.
-    //
-    // Available 2D cases (NavierStokes<2>):
-    //   TestCases::make_2D_1  — Steady,   Re=20,        U_m=0.3
-    //   TestCases::make_2D_2  — Unsteady, Re=100,       U_m=1.5  (constant inlet)
-    //   TestCases::make_2D_3  — Unsteady, Re(t)∈[0,100], U_m=1.5  (sin(πt/8))
-    //
-    // Available 3D cases (NavierStokes<3>):
-    //   TestCases::make_3D_1Z — Steady,   Re=20,        U_m=0.45
-    //   TestCases::make_3D_2Z — Unsteady, Re=100,       U_m=2.25 (constant inlet)
-    //   TestCases::make_3D_3Z — Unsteady, Re(t)∈[0,100], U_m=2.25 (sin(πt/8))
-    //
-    // Optional arguments (after mesh_file):
-    //   TimeScheme:      BackwardEuler / CrankNicolson
-    //   NonlinearMethod: Newton / Linearized
-    //   deltat:          positive value or <= 0 for automatic
-
+    //! Select the mesh and test case to run by uncommenting the desired line below.
+    
     // const std::string mesh_2d = "../meshes/mesh-2D-200.msh";
     const std::string mesh_3d = "../meshes/mesh-3D-5.msh";
 

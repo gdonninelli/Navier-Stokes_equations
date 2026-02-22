@@ -4,13 +4,6 @@ template <unsigned int dim> void NavierStokes<dim>::setup() {
   pcout << "===============================================" << std::endl;
   pcout << "Setup..." << std::endl;
 
-  // TODO: Controllare se va bene, proabilmente mesh non nativamente supprotata
-  // da deal.II, quindi dobbiamo leggere in un triangulation seriale e poi
-  // distribuirla. 0. Mesh loading For parallel::fullydistributed::Triangulation
-  // we must:
-  //   a) Read the mesh into a serial Triangulation
-  //   b) Partition it
-  //   c) Create the distributed triangulation from the description
   {
     Triangulation<dim> serial_mesh;
     GridIn<dim> grid_in;
@@ -45,7 +38,6 @@ template <unsigned int dim> void NavierStokes<dim>::setup() {
           ss << line << "\n";
           first_line_after_header = false;
         } else {
-          // Node line: "id x y z [parametric_data...]"
           // Keep only the first 4 fields: id x y z
           std::istringstream iss(line);
           int id;
@@ -73,9 +65,8 @@ template <unsigned int dim> void NavierStokes<dim>::setup() {
   if (dim == 2)
     U_mean = (2.0 / 3.0) * U_m;
   else
-    U_mean = (4.0 / 9.0) * U_m; // Check paper equation for specific 3D case
+    U_mean = (4.0 / 9.0) * U_m;
 
-  // Re = (U_mean * D) / nu  ->  nu = (U_mean * D) / Re
   nu = (U_mean * D) / Re;
 
   pcout << "  Reynolds number: " << Re << std::endl;
@@ -112,8 +103,7 @@ template <unsigned int dim> void NavierStokes<dim>::setup() {
   locally_owned_dofs = dof_handler.locally_owned_dofs();
   DoFTools::extract_locally_relevant_dofs(dof_handler, locally_relevant_dofs);
 
-  // Verification of Boundary IDs (Cause of errors in assembly if mismatch
-  // between mesh and code)
+  // Verification of Boundary IDs
   {
     const std::vector<types::boundary_id> ids = mesh.get_boundary_ids();
     pcout << "  Boundary IDs found in mesh: ";
@@ -139,10 +129,6 @@ template <unsigned int dim> void NavierStokes<dim>::setup() {
       if (id == outlet_boundary_id)
         has_outlet = true;
     }
-
-    // In parallel, 'ids' only contains locally seen IDs.
-    // We trust that if the mesh is partitioned, at least one proc sees each
-    // boundary. Local check: if *I* don't see outlet, *I* run the check.
 
     if (!has_inlet || !has_walls || !has_cylinder || !has_outlet) {
       pcout << "  WARNING: Expected boundary IDs not found! "
@@ -182,6 +168,7 @@ template <unsigned int dim> void NavierStokes<dim>::setup() {
             const double x = center[0];
             const double y = center[1];
             const double z = center[2];
+
             // since the cylinder is alligned with the x-axis, the distance is
             // computed in the yz-plane
             const double dist_cyl =
@@ -222,8 +209,7 @@ template <unsigned int dim> void NavierStokes<dim>::setup() {
   newton_update.reinit(block_owned_dofs, MPI_COMM_WORLD);
   solution_backup.reinit(block_owned_dofs, MPI_COMM_WORLD);
 
-  // solution, solution_old, current_solution: contain also ghost DoFs (for
-  // assembly)
+  // solution, solution_old, current_solution: contain also ghost DoFs (for assembly)
   solution.reinit(block_owned_dofs, block_relevant_dofs, MPI_COMM_WORLD);
   solution_old.reinit(block_owned_dofs, block_relevant_dofs, MPI_COMM_WORLD);
   current_solution.reinit(block_owned_dofs, block_relevant_dofs,
@@ -237,8 +223,6 @@ template <unsigned int dim> void NavierStokes<dim>::setup() {
   solution = 0.0;
   solution_old = 0.0;
   current_solution = 0.0;
-
-  // TODO: Maybe set initial condition here (understand if it's nedeed)
 
   // 6. Build constraints for Newton updates (homogeneous Dirichlet on velocity)
   //    These are also needed to build a correct sparsity pattern for MPI.
@@ -269,18 +253,12 @@ template <unsigned int dim> void NavierStokes<dim>::setup() {
   }
 
   // 7. Matrices initialization
-  //    Block sparsity pattern: pass constraints + distribute for MPI
-  //    correctness. Without distribute_sparsity_pattern, off-process matrix
-  //    entries are silently dropped by Trilinos during compress(), producing an
-  //    incorrect Jacobian when running on multiple MPI ranks.
   {
     const std::vector<types::global_dof_index> dofs_per_block_sizes = {n_u,
                                                                        n_p};
     BlockDynamicSparsityPattern bdsp(dofs_per_block_sizes,
                                      dofs_per_block_sizes);
-    // Use empty constraints + keep_constrained_dofs=true so the sparsity
-    // pattern is compatible with BOTH newton_constraints (Newton path)
-    // and system_constraints (Linearized path).
+
     AffineConstraints<double> empty_constraints;
     empty_constraints.reinit(locally_relevant_dofs);
     empty_constraints.close();
@@ -469,7 +447,7 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
                                   std::pow(2.0 * u_mag / h, 2) +
                                   std::pow(4.0 * nu / (h * h), 2));
 
-              // Termine SUPG: (u . grad phi_i) * tau * (u . grad phi_j + grad
+              // Termine SUPG: (u * grad phi_i) * tau * (u * grad phi_j + grad
               // psi_j)
               Tensor<1, dim> supg_test_vec =
                   tau * (grad_phi_u[i] * current_velocity_values[q]);
@@ -507,14 +485,10 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
                                                std::pow(4.0 * nu / (h * h), 2));
 
             // Strong Residual Calculation
-            // Time term: (u - u_old)/dt  (Backward Euler approx for residual or
-            // consistent with theta?) Linearized residual uses (u - u_old)/dt
-            // approx usually. Let's use the same time term as in weak form: (u
-            // - u_old)/dt
             Tensor<1, dim> time_res =
                 (current_velocity_values[q] - old_velocity_values[q]) / deltat;
 
-            // Convection: u . grad u
+            // Convection: u * grad u
             Tensor<1, dim> conv_res =
                 current_velocity_gradients[q] * current_velocity_values[q];
 
@@ -531,15 +505,6 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
             Tensor<1, dim> strong_res =
                 time_res + conv_res + pres_res + visc_res + force_res;
 
-            // Subtract (tau * u . grad phi_i) * strong_res from RHS
-            // (The RHS vector accumulates -Residual, so we subtract valid SUPG
-            // term from valid Residual?
-            //  No, RHS = -Residual.
-            //  Standard weak form: (R, v) + (R_strong, tau u.grad v) = 0
-            //  => (R, v) = - (R_strong, tau u.grad v)
-            //  New RHS = - [ (Residual_Weak, v) + (Strong_Res, tau_v) ]
-            //  Existing code accumulates into cell_rhs: -Weak_Res_Terms.
-            //  So we must also subtract the SUPG term.
             cell_rhs(i) -= (grad_phi_u[i] * current_velocity_values[q]) * tau *
                            strong_res * JxW;
           }
@@ -567,7 +532,7 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
   }
   if (!pressure_stiffness_assembled) {
     pressure_stiffness.compress(VectorOperation::add);
-    // Regularize pressure stiffness for the preconditioner!
+    // Regularize pressure stiffness for the preconditioner
     pressure_stiffness.add(1e-6, pressure_mass);
     pressure_stiffness_assembled = true;
   }
@@ -576,7 +541,7 @@ template <unsigned int dim> void NavierStokes<dim>::assemble_newton_system() {
 template <unsigned int dim> void NavierStokes<dim>::solve_newton_system() {
   const double rhs_norm = system_rhs.l2_norm();
 
-  // Usiamo una tolleranza di 1e-8
+  // Use a tollerance of 1e-2
   SolverControl solver_control(200, 1e-2 * rhs_norm);
 
   // Cahouet-Chabard preconditioner:
@@ -634,13 +599,7 @@ void NavierStokes<dim>::assemble_linearized_system() {
   std::vector<Tensor<1, dim>> old_velocity_values(n_q_points);
   std::vector<Tensor<2, dim>> old_velocity_gradients(n_q_points);
   std::vector<Tensor<1, dim>> old_velocity_laplacians(
-      n_q_points); // Assuming we can get laplacians of old solution if
-                   // needed?
-  // Actually we need laplacians of phi_j (trial functions) for LHS
-  // consistency, and laplacians of u_old only for RHS time term consistency?
-  // For linearized, we need to apply the operator to the trial function.
-  // Op(phi_j) = ... - nu * Delta phi_j ...
-  // So we need hessians of the FE shape functions.
+      n_q_points);
   std::vector<Tensor<1, dim>> phi_u_lapl(dofs_per_cell);
 
   std::vector<Tensor<1, dim>> old_old_velocity_values(n_q_points);
@@ -726,24 +685,6 @@ void NavierStokes<dim>::assemble_linearized_system() {
         div_phi_u[k] = fe_values[velocities].divergence(k, q);
         phi_p[k] = fe_values[pressure].value(k, q);
         grad_phi_p[k] = fe_values[pressure].gradient(k, q);
-        // Laplacian of velocity shape function
-        // We need to fetch it from fe_values using the shape_hessian or some
-        // component method? FEValues::shape_hessian gives full hessian. Trace
-        // is Laplacian. Helper:
-
-        // Vector FE: hessian(k,q) returns Tensor<3,dim> if k is vector
-        // component index? Actually fe_values[velocities].hessian(k,q)
-        // returns Tensor<2,dim> which is the hessian of the scalar shape
-        // function? No, velocities is a vector extractor. Let's use the
-        // explicit computed Laplacian if possible, but FESystem shape
-        // functions are tricky. For now, let's assume -nu*Delta u is small
-        // and neglect it in the LHS operator for SUPG consistency OR compute
-        // it properly. Given the user instructions, they didn't ask for full
-        // consistency in LHS, just "SUPG". "1. SUPG ... Formula: ... (u_conv
-        // * grad(phi_i)) * tau * (u_conv * grad(phi_i))" That formula
-        // corresponds to Convection-Convection only. I will stick to what the
-        // user asked for in LHS to avoid compilation headaches with shape
-        // laplacians.
       }
 
       // Evaluate forcing term at t^{n+1} and t^n
@@ -760,7 +701,7 @@ void NavierStokes<dim>::assemble_linearized_system() {
 
       for (unsigned int i = 0; i < dofs_per_cell; ++i) {
         // RHS: explicit contributions from time n
-        // (1/dt)(u^n . phi)
+        // (1/dt)(u^n * phi)
         const double rhs_mass =
             (1.0 / deltat) * (old_velocity_values[q] * phi_u[i]);
 
@@ -769,14 +710,14 @@ void NavierStokes<dim>::assemble_linearized_system() {
             -(1.0 - theta) * nu *
             scalar_product(old_velocity_gradients[q], grad_phi_u[i]);
 
-        // -(1-theta) * ((u^n . grad)u^n . phi)
+        // -(1-theta) * ((u^n * grad)u^n * phi)
         const double rhs_conv =
             -(1.0 - theta) *
             ((old_velocity_gradients[q] * old_velocity_values[q]) * phi_u[i]);
 
         cell_rhs(i) += (rhs_mass + rhs_visc + rhs_conv) * JxW;
 
-        // Forcing term: +theta * f^{n+1} . phi + (1-theta) * f^n . phi
+        // Forcing term: +theta * f^{n+1} * phi + (1-theta) * f^n * phi
         cell_rhs(i) +=
             (theta * (f_new * phi_u[i]) + (1.0 - theta) * (f_old * phi_u[i])) *
             JxW;
@@ -790,8 +731,8 @@ void NavierStokes<dim>::assemble_linearized_system() {
                                              std::pow(2.0 * u_mag / h, 2) +
                                              std::pow(4.0 * nu / (h * h), 2));
 
-          // SUPG Test Function: w_SUPG = tau * (u_star . grad phi_i)
-          // SUPG Test Function vector: w_SUPG = tau * (u_star . grad phi_i)
+          // SUPG Test Function: w_SUPG = tau * (u_star * grad phi_i)
+          // SUPG Test Function vector: w_SUPG = tau * (u_star * grad phi_i)
           Tensor<1, dim> supg_test_vec = tau * (u_star * grad_phi_u[i]);
 
           // --- SUPG RHS Consistency ---
@@ -827,13 +768,6 @@ void NavierStokes<dim>::assemble_linearized_system() {
           cell_matrix(i, j) += val * JxW;
 
           // --- SUPG Stabilization (Linearized LHS) ---
-          // Added term: (supg_test_vec, LinearOperator(phi_j))
-          // LinearOperator(phi_j) approx: phi_j/dt + u*.grad phi_j + grad
-          // psi_j Note: neglecting -nu Delta phi_j (consistent with user
-          // request)
-
-          // Re-calculate supg_test_vec (needed here as i is outer loop, but j
-          // changes) Wait, i is fixed in this inner loop.
           if (use_supg) {
             const double h = cell->diameter();
             const double u_mag = u_star.norm();
@@ -845,12 +779,6 @@ void NavierStokes<dim>::assemble_linearized_system() {
             // Time + Convection part
             Tensor<1, dim> op_phi_j = phi_u[j] / deltat;
             op_phi_j += u_star * grad_phi_u[j]; // Convection
-            // op_phi_j += grad_phi_p[j]; // Pressure gradient? phi_p is scalar
-            // pressure shape. Wait. j iterates dofs_per_cell. If j corresponds
-            // to velocity dof, phi_u[j] is nonzero, phi_p[j] is zero? Yes. But
-            // grad_phi_p[j] is only non-zero if j is pressure dof. But op_phi_j
-            // vector is momentum equation residual. If j is pressure dof, then
-            // phi_u[j]=0. The term is grad psi_j. So we strictly add:
 
             // 1. Time + Convection part (acting on velocity dofs)
             cell_matrix(i, j) +=
@@ -900,8 +828,6 @@ void NavierStokes<dim>::assemble_linearized_system() {
   }
   if (!pressure_stiffness_assembled) {
     pressure_stiffness.compress(VectorOperation::add);
-    // Regularize stiffness matrix for preconditioner (Linearized method needs
-    // this too!)
     pressure_stiffness.add(1e-6, pressure_mass);
     pressure_stiffness_assembled = true;
   }
@@ -909,7 +835,7 @@ void NavierStokes<dim>::assemble_linearized_system() {
 
 template <unsigned int dim> bool NavierStokes<dim>::solve_linear_system() {
   const double rhs_norm = system_rhs.l2_norm();
-  // Use 1e-8 relative tolerance
+  // Use 1e-2 relative tolerance
   SolverControl solver_control(200, 1e-2 * rhs_norm);
 
   PreconditionBlockTriangular preconditioner;
@@ -945,9 +871,6 @@ template <unsigned int dim> bool NavierStokes<dim>::solve_linear_system() {
 }
 
 // Compute pressure difference between front and back of the cylinder.
-// Robust MPI handling: tracks which ranks found the point to avoid
-// silent errors (no rank finds it) or double-counting (multiple ranks find
-// it).
 template <unsigned int dim>
 double NavierStokes<dim>::compute_pressure_difference() {
   Point<dim> p_front, p_end;
@@ -959,7 +882,7 @@ double NavierStokes<dim>::compute_pressure_difference() {
     p_end = Point<dim>(0.205, 0.2, 0.50);
   }
 
-  // Helper lambda: evaluate pressure at a point robustly across MPI ranks
+  // Evaluate pressure at a point robustly across MPI ranks
   auto evaluate_pressure = [&](const Point<dim> &pt) -> double {
     double local_press = 0.0;
     int found = 0;
@@ -1042,15 +965,12 @@ void NavierStokes<dim>::compute_lift_drag(double &drag_coeff,
             const double JxW = fe_face_values.JxW(q);
 
             // Stress tensor: sigma = -pI + rho*nu*(grad_u + grad_u^T)
-            // Note: rho=1 in the code, but we use the member variable rho for
-            // correctness
             Tensor<2, dim> stress;
             for (unsigned int i = 0; i < dim; ++i)
               stress[i][i] = -p;
 
             // Viscous part (symmetric tensor)
             // stress += rho * nu * (grad_u + transpose(grad_u));
-            // In deal.II:
             stress += rho * nu * (grad_u + transpose(grad_u));
 
             // Local force = stress * normal
@@ -1072,10 +992,9 @@ void NavierStokes<dim>::compute_lift_drag(double &drag_coeff,
   if constexpr (dim == 3)
     force_z = Utilities::MPI::sum(force_z, MPI_COMM_WORLD);
 
-  // Cd = 2 * Fd / (rho * U_mean^2 * D * L)
-  // where L = 1 (2D) or H (3D)
-  // The factor 2 is required by the standard Schaefer-Turek benchmark.
-
+  //* Cd = 2 * Fd / (rho * U_mean^2 * D * L)
+  //* where L = 1 (2D) or H (3D)
+  //* The factor 2 is required by the standard Schaefer-Turek benchmark.
   double U_mean = 0.0;
   if (dim == 2)
     U_mean = (2.0 / 3.0) * U_m;
@@ -1163,12 +1082,6 @@ template <unsigned int dim> void NavierStokes<dim>::run() {
     time += deltat;
     time_step++;
 
-    // For the very first step with Crank-Nicolson, override to
-    // Backward Euler (theta=1).  CN at the first step amplifies the
-    // discontinuity between the zero IC and the inlet BC, creating
-    // 2nd-order oscillations in velocity and pressure that often
-    // prevent GMRES convergence.  BE damps them out.  After this
-    // single step we restore the user's theta.
     const double theta_save = theta;
     if (first_step && time_scheme == TimeScheme::CrankNicolson) {
       theta = 1.0;
@@ -1303,7 +1216,7 @@ template <unsigned int dim> void NavierStokes<dim>::run() {
     // Linearized Approach
     else {
       // Adaptive time-stepping con checkpointing
-      constexpr int max_substeps = 4; // max dimezzamenti dt consentiti
+      constexpr int max_substeps = 4; // Max number of substeps (dt halving) before giving up
 
       // Salva lo stato prima di tentare il passo
       TrilinosWrappers::MPI::BlockVector solution_checkpoint = solution_old;
@@ -1317,7 +1230,7 @@ template <unsigned int dim> void NavierStokes<dim>::run() {
 
       while (!step_ok && substep <= max_substeps) {
         if (substep > 0) {
-          // Dimezza dt e ripristina lo stato al checkpoint
+          // Halve the dt and restore checkpoint
           dt_attempt *= 0.5;
           solution_old = solution_checkpoint;
           solution_old_old = solution_old_old_checkpoint;
@@ -1326,16 +1239,15 @@ template <unsigned int dim> void NavierStokes<dim>::run() {
                 << substep + 1 << ")" << std::endl;
         }
 
-        // Sostituisce temporaneamente deltat per l'assembly
         const double deltat_save = deltat;
         deltat = dt_attempt;
 
-        // Tenta con CN + u_star di ordine 2
+        // Try to solve with the new dt
         assemble_linearized_system();
         bool gmres_ok = solve_linear_system();
 
         if (!gmres_ok && substep == 0) {
-          // Primo fallback: stessa dt ma BE + u_star primo ordine
+          // First fallback: if GMRES fails on the first attempt, try again with Backward Euler
           pcout << "  Fallback to BE + 1st-order..." << std::endl;
           const double theta_save_inner = theta;
           const bool fs_save = first_step;
@@ -1361,7 +1273,7 @@ template <unsigned int dim> void NavierStokes<dim>::run() {
       }
 
       if (!step_ok) {
-        // Ultimo tentativo disperato: ripristina checkpoint e usa BE puro
+        // Last try
         pcout << "  CRITICAL: all attempts failed. "
               << "Restoring checkpoint and forcing BE dt=" << dt_attempt
               << std::endl;
@@ -1375,7 +1287,7 @@ template <unsigned int dim> void NavierStokes<dim>::run() {
         first_step = true;
         deltat = dt_attempt;
         assemble_linearized_system();
-        solve_linear_system(); // accettiamo comunque il risultato
+        solve_linear_system(); // Still keep the result even if it fails
         theta = theta_save_inner;
         first_step = fs_save;
         deltat = deltat_save;
@@ -1394,7 +1306,7 @@ template <unsigned int dim> void NavierStokes<dim>::run() {
     // Shift time levels
     solution_old_old = solution_old;
     solution_old = current_solution;
-    second_step = first_step; // second_step = true solo durante il 2° step
+    second_step = first_step;
     first_step = false;
 
     // Restore original theta after first step override

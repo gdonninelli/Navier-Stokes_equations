@@ -276,22 +276,6 @@ public:
   };
 
   // Block-triangular preconditioner
-  //
-  // For the saddle-point system  [A  G; D  0] [du; dp] = [f; g],
-  // the Schur complement is  S = -D A^{-1} G  (negative semi-definite).
-  //
-  // The lower block-triangular preconditioner is:
-  //   P = [A  0; D  C]   with  C ≈ S
-  //
-  // For time-dependent NS:  A ≈ (rho/dt)M + theta*nu*K + conv.
-  //
-  // Cahouet-Chabard Schur complement approximation:
-  //   S^{-1}  ≈  -(rho/dt) K_p^{-1}  -  theta*nu * M_p^{-1}
-  //
-  // where K_p is the pressure Laplacian (stiffness) and M_p is the
-  // pressure mass.  The first term captures the mass-dominated (low
-  // frequency) regime and the second the viscosity-dominated (high
-  // frequency) regime, giving mesh-independent GMRES iterations.
   class PreconditionBlockTriangular
   {
   public:
@@ -337,11 +321,10 @@ public:
     vmult(TrilinosWrappers::MPI::BlockVector       &dst,
           const TrilinosWrappers::MPI::BlockVector &src) const
     {
-      // Step 1: Approximate velocity solve  x ≈ A^{-1} f
+      // Step 1: Approximate velocity solve  x = A^{-1} f
       preconditioner_velocity.vmult(dst.block(0), src.block(0));
 
       // Step 2: Compute  tmp = g - D x  (= g - B*dst0)
-      // Lazy-init tmp from src to guarantee Epetra_Map compatibility
       if (!tmp_initialized)
         {
           tmp.reinit(src.block(1));
@@ -352,9 +335,6 @@ public:
       tmp.sadd(-1.0, src.block(1));      // tmp = g - D x
 
       // Step 3: Cahouet-Chabard Schur complement solve
-      //   S^{-1} ≈ -(rho/dt)*K_p^{-1} - theta*nu*M_p^{-1}
-      //
-      // Term 1 (dominant): -(rho/dt) * K_p^{-1} * (g - Dx)
       preconditioner_pressure_lapl.vmult(dst.block(1), tmp);
       dst.block(1) *= -(rho_val / deltat_val);
 
@@ -385,16 +365,6 @@ public:
     mutable bool tmp_initialized = false;
   };
 
-  // ==========================================================================
-  // Constructor
-  // ==========================================================================
-  // -----------------------------------------------------------------------
-  // Constructor.
-  // Functions are injected via shared_ptr for maximum flexibility.
-  // If a pointer is nullptr, the default implementation is used.
-  // -----------------------------------------------------------------------
-  // Static helper: suggested dt based on Reynolds number
-  // -----------------------------------------------------------------------
   static double compute_default_deltat(double Re)
   {
     if (Re <= 20)       return 0.1;
@@ -404,11 +374,6 @@ public:
     else                return 0.005;
   }
 
-  // -----------------------------------------------------------------------
-  // Constructor from BenchmarkTestCase (delegates to full constructor).
-  // Usage:  auto tc = TestCases::make_2D_3(mesh_file);
-  //         NavierStokes<2> solver(tc);
-  // -----------------------------------------------------------------------
   NavierStokes(const BenchmarkTestCase<dim> &tc)
     : NavierStokes(tc.mesh_file, tc.degree_velocity, tc.degree_pressure,
                    tc.deltat, tc.T, tc.Re, tc.U_m,
@@ -418,10 +383,6 @@ public:
                    tc.use_supg)
   {}
 
-  // -----------------------------------------------------------------------
-  // Constructor.
-  // deltat_ <= 0 means auto-select based on Re.
-  // -----------------------------------------------------------------------
   NavierStokes(
     const std::string  &mesh_file_name_,
     const unsigned int &degree_velocity_,
