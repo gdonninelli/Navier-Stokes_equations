@@ -1,16 +1,16 @@
-### Organizing the source code
+## 1. Organizing the source code
 Please place all your sources into the `src` folder.
 
 Binary files must not be uploaded to the repository (including executables).
 
 Mesh files should not be uploaded to the repository. If applicable, upload `gmsh` scripts with suitable instructions to generate the meshes (and ideally a Makefile that runs those instructions). If not applicable, consider uploading the meshes to a different file sharing service, and providing a download link as part of the building and running instructions.
 
-### Chosing the test to run
+## 2. Chosing the test to run
 The test case is selected in `main.cpp`.
 To run a specific test, comment out the currently active test line and uncomment the line corresponding to the test you want, then recompile and run the executable.
 
 
-### Compiling
+## 3. Compiling
 To build the executable, make sure you have loaded the needed modules with
 ```bash
 $ module load gcc-glibc dealii
@@ -27,7 +27,7 @@ The executable will be created into `build`, and can be executed through
 $ ./executable-name
 ```
 
-## 2. Mesh Generation
+## 4. Mesh Generation
 
 The meshes were modeled and generated using [Gmsh](http://gmsh.info/). The reference geometry is the channel flow past a cylindrical obstacle.
 
@@ -54,7 +54,7 @@ gmsh -2 <mesh-2D-name>.geo -o <mesh-2D-name>.msh
 
 ```
 
-## 3. Cluster Execution
+## 5. Cluster Execution
 
 The solver is parallelized with MPI to run on the MOX's cluster. The cluster is equipped with a PBS/Torque job scheduler, so we use the `job.pbs` file.
 
