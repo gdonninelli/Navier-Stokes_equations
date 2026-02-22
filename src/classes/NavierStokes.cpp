@@ -577,7 +577,7 @@ template <unsigned int dim> void NavierStokes<dim>::solve_newton_system() {
   const double rhs_norm = system_rhs.l2_norm();
 
   // Usiamo una tolleranza di 1e-8
-  SolverControl solver_control(200, 1e-2 * rhs_norm);
+  SolverControl solver_control(500, 1e-2 * rhs_norm);
 
   // Cahouet-Chabard preconditioner:
   //   Velocity block: ILU (robust for convection-dominated)
