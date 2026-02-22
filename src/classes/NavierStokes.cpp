@@ -542,18 +542,15 @@ template <unsigned int dim> void NavierStokes<dim>::solve_newton_system() {
   const double rhs_norm = system_rhs.l2_norm();
 
   // Use a tollerance of 1e-2
-  SolverControl solver_control(200, 1e-2 * rhs_norm);
+  SolverControl solver_control(500, 1e-2 * rhs_norm);
 
   // Cahouet-Chabard preconditioner:
-  //   Velocity block: ILU (robust for convection-dominated)
-  //   Pressure block: S^{-1} ≈ -(rho/dt)*K_p^{-1} - theta*nu*M_p^{-1}
   PreconditionBlockTriangular preconditioner;
   preconditioner.initialize(system_matrix.block(0, 0),
                             pressure_mass.block(1, 1),
                             pressure_stiffness.block(1, 1),
                             system_matrix.block(1, 0), nu, rho, deltat, theta);
 
-  // GMRES con restart=150 per sistemi saddle-point
   typename SolverGMRES<TrilinosWrappers::MPI::BlockVector>::AdditionalData
       gmres_data(150);
   SolverGMRES<TrilinosWrappers::MPI::BlockVector> solver(solver_control,
@@ -913,11 +910,6 @@ double NavierStokes<dim>::compute_pressure_difference() {
 
   return evaluate_pressure(p_front) - evaluate_pressure(p_end);
 }
-
-// TODO we have to check if the direction of the flux in 3D is really in the z
-// direction
-// TODO in this case is set different from the paper (where it is along the x
-// direction)
 template <unsigned int dim>
 void NavierStokes<dim>::compute_lift_drag(double &drag_coeff,
                                           double &lift_coeff) const {
